@@ -87,6 +87,67 @@ def _block_data(block: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _render_simple_table(
+    block: dict[str, Any],
+    blocks: dict[str, Any],
+    children_map: dict[str, list[str]],
+    text_map: dict[str, str],
+) -> list[str]:
+    """Render a simple_table block (with rows/cells/paragraph children) to
+    markdown table syntax. Bypasses normal recursion."""
+    rows_data: list[list[str]] = []
+    aligns: list[str | None] = []
+
+    for row_id in children_map.get(block.get("children", ""), []):
+        row = blocks.get(row_id)
+        if not row or row.get("ty") != "simple_table_row":
+            continue
+        cells: list[str] = []
+        for cell_id in children_map.get(row.get("children", ""), []):
+            cell = blocks.get(cell_id)
+            if not cell or cell.get("ty") != "simple_table_cell":
+                continue
+            cell_data = _block_data(cell)
+            col_pos = cell_data.get("colPosition")
+            if len(rows_data) == 0 and isinstance(col_pos, int):
+                while len(aligns) <= col_pos:
+                    aligns.append(None)
+                aligns[col_pos] = cell_data.get("align")
+            # Cell text = concatenation of child paragraphs' text
+            para_texts: list[str] = []
+            for para_id in children_map.get(cell.get("children", ""), []):
+                para = blocks.get(para_id)
+                if para is None:
+                    continue
+                t = _block_text(para, text_map)
+                if t:
+                    para_texts.append(t)
+            cell_text = " ".join(para_texts).replace("\n", " ").replace("|", "\\|")
+            cells.append(cell_text)
+        rows_data.append(cells)
+
+    if not rows_data:
+        return []
+
+    col_count = max(len(r) for r in rows_data)
+    for r in rows_data:
+        while len(r) < col_count:
+            r.append("")
+    while len(aligns) < col_count:
+        aligns.append(None)
+
+    def sep(a: str | None) -> str:
+        return {"center": ":---:", "right": "---:", "left": ":---"}.get(a, "---")
+
+    out: list[str] = []
+    out.append("| " + " | ".join(rows_data[0]) + " |")
+    out.append("| " + " | ".join(sep(a) for a in aligns) + " |")
+    for r in rows_data[1:]:
+        out.append("| " + " | ".join(r) + " |")
+    # Join into a single block so it renders contiguous in the final output
+    return ["\n".join(out)]
+
+
 def _render_block(
     block_id: str,
     blocks: dict[str, Any],
@@ -99,9 +160,12 @@ def _render_block(
     if not block:
         return []
 
+    ty = block.get("ty", "")
+    if ty == "simple_table":
+        return _render_simple_table(block, blocks, children_map, text_map)
+
     text = _block_text(block, text_map)
     data = _block_data(block)
-    ty = block.get("ty", "")
     indent = "  " * depth
 
     line: str | None

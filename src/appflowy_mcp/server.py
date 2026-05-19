@@ -4,7 +4,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import AppFlowyClient
 from .config import Config
-from .doc_builder import build_document
+from .doc_builder import build_document, build_replacement_update
 from .markdown import render_document
 from .markdown_to_blocks import parse as parse_markdown
 
@@ -99,7 +99,6 @@ def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
                 "layout": _LAYOUT_NAMES.get(layout, layout),
                 "error": f"layout {layout!r} is not readable as a document",
             }
-        body = await client.get_collab_json(workspace_id, view_id, collab_type)
         result: dict[str, Any] = {
             "view_id": view_id,
             "name": view_meta.get("name"),
@@ -108,8 +107,12 @@ def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
             "last_editor_email": (meta.get("last_editor") or {}).get("email"),
         }
         if collab_type == 0:
+            # Decode via pycrdt to preserve inline formatting deltas. The
+            # server's /collab/json flattens Y.Text into plain strings.
+            body = await client.get_document_decoded(workspace_id, view_id)
             result["content_markdown"] = render_document(body)
         else:
+            body = await client.get_collab_json(workspace_id, view_id, collab_type)
             result["content_json"] = body
         return result
 
@@ -171,16 +174,17 @@ def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
         WARNING: This *replaces* the page body — anything that was there is lost.
         Read first with read_page() if you need to preserve / merge.
 
-        Supported markdown features (v1):
-        - Headings (# .. ######)
-        - Paragraphs
-        - Bulleted lists (- or *), numbered lists (1. 2.), todo (- [ ] / - [x])
-          with indent-based nesting (2 spaces per level)
-        - Quotes (>)
-        - Fenced code blocks (```lang ... ```)
-        - Dividers (---)
-        Inline formatting (bold/italic/links) is not yet preserved — text comes
-        through as plain text.
+        IMPORTANT — live editor conflict: if the page is currently open in
+        someone's AppFlowy browser/desktop client (WebSocket session active),
+        the live client's local Y.Doc state will overwrite our write. Close all
+        AppFlowy tabs/windows for this page before calling this tool, then
+        reopen after to see the change. (The realtime-sync write path that
+        avoids this is non-trivial; tracked separately.)
+
+        Supported markdown:
+        - Headings, paragraphs, bulleted/numbered/todo lists with nesting,
+          quotes, fenced code, dividers, simple_table with alignments
+        - Inline: **bold**, *italic*, `code`, ~~strike~~, [link](url)
 
         Only valid for Document-layout pages. Use create_page() to make one.
 

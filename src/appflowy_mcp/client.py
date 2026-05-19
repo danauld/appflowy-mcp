@@ -1,8 +1,10 @@
 import asyncio
+import json as _json
 import time
 from typing import Any
 
 import httpx
+from pycrdt import Doc, Map
 
 
 class AppFlowyError(RuntimeError):
@@ -180,8 +182,13 @@ class AppFlowyClient:
         encoded_collab_v1: bytes,
         collab_type: int = 0,
     ) -> None:
-        """Replace document content. encoded_collab_v1 must be bincode-serialized
-        EncodedCollab struct (state_vector + doc_state + version) — see doc_builder.
+        """Replace document content via background DB upsert. encoded_collab_v1
+        must be bincode-serialized EncodedCollab (state_vector + doc_state +
+        version) — see doc_builder.build_document.
+
+        Caveat: this writes only to the storage backend; active realtime
+        WebSocket sessions (browser/desktop with the page open) may overwrite
+        with their local state. Prefer `apply_doc_update_web` for live updates.
         """
         await self.request(
             "PUT",
@@ -193,6 +200,89 @@ class AppFlowyClient:
                 "collab_type": collab_type,
             },
         )
+
+    async def apply_doc_update_web(
+        self,
+        workspace_id: str,
+        object_id: str,
+        doc_state: bytes,
+        collab_type: int = 0,
+    ) -> None:
+        """Apply a Yrs v1 incremental update through the realtime sync server.
+
+        Routes via `/api/workspace/v1/{ws}/collab/{obj}/web-update` — the same
+        channel AppFlowy Web uses. Changes are broadcast to all connected
+        WebSocket sessions in real time.
+        """
+        await self.request(
+            "POST",
+            f"/api/workspace/v1/{workspace_id}/collab/{object_id}/web-update",
+            json={
+                "doc_state": list(doc_state),
+                "collab_type": collab_type,
+            },
+        )
+
+    async def get_document_decoded(
+        self, workspace_id: str, view_id: str
+    ) -> dict[str, Any]:
+        """Fetch a Document's raw Y.Doc bytes and decode via pycrdt.
+
+        Returns the same shape as `/collab/json` but with text_map values that
+        preserve inline formatting (as JSON-serialized Yjs deltas where present;
+        plain strings where the text has no formatting).
+        """
+        page = await self.get_page_view(workspace_id, view_id)
+        raw = bytes(page.get("data", {}).get("encoded_collab") or b"")
+        if not raw:
+            return {}
+
+        doc = Doc()
+        doc["data"] = Map({})
+        doc.apply_update(raw)
+        document = doc["data"]["document"]
+
+        blocks_out: dict[str, dict[str, Any]] = {}
+        blocks_map = document["blocks"]
+        for bid in list(blocks_map.keys()):
+            b = blocks_map[bid]
+            blocks_out[bid] = {k: b[k] for k in b.keys()}
+
+        children_out: dict[str, list[str]] = {}
+        cm = document["meta"]["children_map"]
+        for ck in list(cm.keys()):
+            arr = cm[ck]
+            children_out[ck] = list(arr)
+
+        text_out: dict[str, str] = {}
+        tm = document["meta"]["text_map"]
+        for tk in list(tm.keys()):
+            runs = tm[tk].diff()
+            if not runs:
+                text_out[tk] = ""
+            elif len(runs) == 1 and not runs[0][1]:
+                text_out[tk] = runs[0][0]
+            else:
+                ops = []
+                for chunk, attrs in runs:
+                    op = {"insert": chunk}
+                    if attrs:
+                        op["attributes"] = attrs
+                    ops.append(op)
+                text_out[tk] = _json.dumps(ops, ensure_ascii=False)
+
+        return {
+            "collab": {
+                "document": {
+                    "page_id": document["page_id"],
+                    "blocks": blocks_out,
+                    "meta": {
+                        "children_map": children_out,
+                        "text_map": text_out,
+                    },
+                }
+            }
+        }
 
     async def get_collab_json(
         self, workspace_id: str, object_id: str, collab_type: int
