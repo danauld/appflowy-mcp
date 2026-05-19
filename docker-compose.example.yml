@@ -1,0 +1,19 @@
+# Add this service to appflowy-cloud/docker-compose.yml (or include via override).
+# Exposes the MCP server on host port 8765 by default.
+services:
+  appflowy_mcp:
+    build: ../appflowy-mcp
+    image: appflowy-mcp:0.4.0
+    restart: unless-stopped
+    environment:
+      APPFLOWY_BASE_URL: http://appflowy_cloud:8000  # internal, bypass nginx/TLS
+      APPFLOWY_TLS_VERIFY: "true"
+      APPFLOWY_BOT_EMAIL: ${APPFLOWY_MCP_BOT_EMAIL}
+      APPFLOWY_BOT_PASSWORD: ${APPFLOWY_MCP_BOT_PASSWORD}
+      APPFLOWY_MCP_TRANSPORT: http
+      APPFLOWY_MCP_HOST: 0.0.0.0
+      APPFLOWY_MCP_PORT: 8765
+    ports:
+      - "8765:8765"
+    depends_on:
+      - appflowy_cloud

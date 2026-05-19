@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.idea/
+.vscode/
+
+# Local scratch / dev outputs (not part of the shipping package)
+collab_dump.json
+edit_poc.py
+edit_poc_output.txt
+rendered.md
+smoke_output.txt
