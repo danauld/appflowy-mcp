@@ -2,6 +2,18 @@
 
 Version history of `appflowy-mcp`. Format is informal; we record what changed and why.
 
+## 0.8.0 — 2026-05-20 — **breaking**
+
+### Changed
+- Per-user auth instead of a single shared bot. The server now reads `X-AppFlowy-Email` and `X-AppFlowy-Password` from each MCP HTTP request and runs every tool under the caller's AppFlowy identity. An internal pool caches one `AppFlowyClient` per `(email, password)` so token state is isolated per user.
+- `Config` no longer reads `APPFLOWY_BOT_EMAIL` / `APPFLOWY_BOT_PASSWORD`. Removed from `docker-compose.override.yml`.
+- stdio transport refused at startup — per-user headers require streamable-HTTP.
+
+### Migration
+- Drop `APPFLOWY_MCP_BOT_EMAIL`/`APPFLOWY_MCP_BOT_PASSWORD` from `appflowy-cloud/.env`.
+- Each MCP client must send `X-AppFlowy-Email` and `X-AppFlowy-Password` headers. Example: `claude mcp add --transport http --header "X-AppFlowy-Email: alice@..." --header "X-AppFlowy-Password: ..." appflowy http://host:8765/mcp`.
+- TLS becomes mandatory once exposed beyond localhost (credentials travel in headers on every request) — terminate at a reverse proxy.
+
 ## 0.7.2 — 2026-05-20
 
 ### Changed

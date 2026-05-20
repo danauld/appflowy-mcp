@@ -5,8 +5,6 @@ from dataclasses import dataclass
 @dataclass
 class Config:
     base_url: str
-    email: str
-    password: str
     tls_verify: bool
     transport: str
     host: str
@@ -20,7 +18,7 @@ class Config:
                 raise RuntimeError(f"Missing required env var: {key}")
             return value
 
-        transport = os.getenv("APPFLOWY_MCP_TRANSPORT", "stdio").lower()
+        transport = os.getenv("APPFLOWY_MCP_TRANSPORT", "http").lower()
         if transport not in ("stdio", "http"):
             raise RuntimeError(
                 f"APPFLOWY_MCP_TRANSPORT must be 'stdio' or 'http', got: {transport}"
@@ -28,8 +26,6 @@ class Config:
 
         return cls(
             base_url=required("APPFLOWY_BASE_URL").rstrip("/"),
-            email=required("APPFLOWY_BOT_EMAIL"),
-            password=required("APPFLOWY_BOT_PASSWORD"),
             tls_verify=os.getenv("APPFLOWY_TLS_VERIFY", "true").lower()
             in ("true", "1", "yes"),
             transport=transport,

@@ -1,10 +1,11 @@
+import asyncio
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from .client import AppFlowyClient
 from .config import Config
-from .doc_builder import build_document, build_replacement_update
+from .doc_builder import build_document
 from .markdown import render_document
 from .markdown_to_blocks import parse as parse_markdown
 
@@ -15,6 +16,10 @@ _LAYOUT_NAME_TO_INT = {v: k for k, v in _LAYOUT_NAMES.items()}
 
 # AppFlowy CollabType enum used by /collab/json endpoint.
 _LAYOUT_TO_COLLAB_TYPE = {0: 0, 1: 1, 2: 1, 3: 1}  # Chat (4) has no doc-style collab
+
+
+class _MissingCredentials(ValueError):
+    pass
 
 
 def _trim_folder_view(node: dict[str, Any]) -> dict[str, Any]:
@@ -29,22 +34,70 @@ def _trim_folder_view(node: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
+class ClientPool:
+    """Per-user AppFlowyClient cache, keyed by (email, password).
+
+    Each MCP request carries X-AppFlowy-Email/Password headers identifying the
+    end user. The pool gives every distinct (email, password) its own client,
+    which logs in to AppFlowy under that identity and refreshes its own tokens.
+    """
+
+    def __init__(self, config: Config) -> None:
+        self._config = config
+        self._cache: dict[tuple[str, str], AppFlowyClient] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, ctx: Context) -> AppFlowyClient:
+        try:
+            request = ctx.request_context.request
+        except (AttributeError, LookupError, ValueError) as exc:
+            raise _MissingCredentials(
+                "MCP server requires HTTP transport with "
+                "X-AppFlowy-Email/X-AppFlowy-Password headers"
+            ) from exc
+        if request is None or not hasattr(request, "headers"):
+            raise _MissingCredentials(
+                "No HTTP request context available; this server only supports "
+                "the streamable-HTTP transport with per-user auth headers"
+            )
+        email = request.headers.get("X-AppFlowy-Email")
+        password = request.headers.get("X-AppFlowy-Password")
+        if not email or not password:
+            raise _MissingCredentials(
+                "Missing X-AppFlowy-Email or X-AppFlowy-Password header. "
+                "Configure your MCP client to send both."
+            )
+        key = (email, password)
+        async with self._lock:
+            client = self._cache.get(key)
+            if client is None:
+                client = AppFlowyClient(
+                    base_url=self._config.base_url,
+                    email=email,
+                    password=password,
+                    verify=self._config.tls_verify,
+                )
+                self._cache[key] = client
+        return client
+
+    async def aclose(self) -> None:
+        for client in self._cache.values():
+            await client.aclose()
+        self._cache.clear()
+
+
+def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
     mcp = FastMCP("appflowy", host=config.host, port=config.port)
-    client = AppFlowyClient(
-        base_url=config.base_url,
-        email=config.email,
-        password=config.password,
-        verify=config.tls_verify,
-    )
+    pool = ClientPool(config)
 
     @mcp.tool()
-    async def list_workspaces() -> list[dict[str, Any]]:
-        """List AppFlowy workspaces accessible to the configured bot user.
+    async def list_workspaces(ctx: Context) -> list[dict[str, Any]]:
+        """List AppFlowy workspaces accessible to the calling user.
 
         Returns one entry per workspace with: workspace_id, workspace_name,
         owner_email, role (Owner / Member / Guest), icon, created_at.
         """
+        client = await pool.get(ctx)
         rows = await client.list_workspaces()
         return [
             {
@@ -59,7 +112,9 @@ def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
         ]
 
     @mcp.tool()
-    async def list_pages(workspace_id: str, depth: int = 10) -> dict[str, Any]:
+    async def list_pages(
+        ctx: Context, workspace_id: str, depth: int = 10
+    ) -> dict[str, Any]:
         """Return the folder tree of a workspace.
 
         Each node has: view_id, name, layout (Document/Grid/Board/Calendar/Chat),
@@ -71,11 +126,14 @@ def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
             workspace_id: Workspace UUID (from list_workspaces).
             depth: How deep to walk the tree. Default 10 covers most layouts.
         """
+        client = await pool.get(ctx)
         folder = await client.get_folder(workspace_id, depth=depth)
         return _trim_folder_view(folder)
 
     @mcp.tool()
-    async def read_page(workspace_id: str, view_id: str) -> dict[str, Any]:
+    async def read_page(
+        ctx: Context, workspace_id: str, view_id: str
+    ) -> dict[str, Any]:
         """Read a page's content as Markdown.
 
         For Document layouts: returns rendered Markdown reconstructed from the
@@ -88,6 +146,7 @@ def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
             workspace_id: Workspace UUID.
             view_id: Page UUID (from list_pages).
         """
+        client = await pool.get(ctx)
         meta = await client.get_page_view(workspace_id, view_id)
         view_meta = meta.get("view") or {}
         layout = view_meta.get("layout")
@@ -118,6 +177,7 @@ def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
 
     @mcp.tool()
     async def create_page(
+        ctx: Context,
         workspace_id: str,
         parent_view_id: str,
         name: str,
@@ -146,12 +206,13 @@ def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
                     f"{sorted(_LAYOUT_NAME_TO_INT)}; got {layout!r}"
                 )
             }
+        client = await pool.get(ctx)
         page = await client.create_page(workspace_id, parent_view_id, name, layout_int)
         return {"view_id": page.get("view_id"), "name": name, "layout": layout}
 
     @mcp.tool()
     async def rename_page(
-        workspace_id: str, view_id: str, new_name: str
+        ctx: Context, workspace_id: str, view_id: str, new_name: str
     ) -> dict[str, Any]:
         """Rename an existing page.
 
@@ -162,12 +223,13 @@ def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
 
         Returns: { view_id, name } on success.
         """
+        client = await pool.get(ctx)
         await client.rename_page(workspace_id, view_id, new_name)
         return {"view_id": view_id, "name": new_name}
 
     @mcp.tool()
     async def replace_page_content(
-        workspace_id: str, view_id: str, markdown_content: str
+        ctx: Context, workspace_id: str, view_id: str, markdown_content: str
     ) -> dict[str, Any]:
         """Replace a Document page's entire content with new markdown.
 
@@ -195,6 +257,7 @@ def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
 
         Returns: { view_id, blocks_written } on success.
         """
+        client = await pool.get(ctx)
         blocks = parse_markdown(markdown_content)
         encoded = build_document(blocks)
         await client.update_page_collab(
@@ -202,4 +265,4 @@ def build_server(config: Config) -> tuple[FastMCP, AppFlowyClient]:
         )
         return {"view_id": view_id, "blocks_written": len(blocks)}
 
-    return mcp, client
+    return mcp, pool

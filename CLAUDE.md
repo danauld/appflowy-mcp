@@ -6,7 +6,7 @@ An MCP server that gives LLM agents (Claude Code, Cline, Claude Desktop, ...) to
 
 ## What is inside
 
-A thin wrapper around the AppFlowy-Cloud REST API plus native Yrs CRDT document assembly on pycrdt. 6 MCP tools:
+A thin wrapper around the AppFlowy-Cloud REST API plus native Yrs CRDT document assembly on pycrdt. Per-user auth model: every MCP HTTP request carries `X-AppFlowy-Email` / `X-AppFlowy-Password` headers, and tools run under the caller's AppFlowy identity. No shared bot. 6 MCP tools:
 
 | Tool | What it does | AppFlowy endpoint |
 |---|---|---|
@@ -70,9 +70,18 @@ On **every** code change:
 See [.env.example](.env.example):
 - `APPFLOWY_BASE_URL` — for the container inside the stack this is `http://nginx` (internal gateway); for local dev — `https://localhost`.
 - `APPFLOWY_TLS_VERIFY` — `false` for self-signed on localhost.
-- `APPFLOWY_BOT_EMAIL` / `APPFLOWY_BOT_PASSWORD` — the account we use to call AppFlowy.
-- `APPFLOWY_MCP_TRANSPORT` — `stdio` (dev) or `http` (container).
-- `APPFLOWY_MCP_HOST` / `APPFLOWY_MCP_PORT` — for the HTTP transport (default `0.0.0.0:8765`).
+- `APPFLOWY_MCP_TRANSPORT` — must be `http` (per-user auth requires the HTTP transport to read headers).
+- `APPFLOWY_MCP_HOST` / `APPFLOWY_MCP_PORT` — bind address (default `0.0.0.0:8765`).
+
+The server has **no static credentials**. Per-user identity comes from the `X-AppFlowy-Email` and `X-AppFlowy-Password` headers on each MCP request. `smoke_test.py` reads `APPFLOWY_BOT_EMAIL`/`APPFLOWY_BOT_PASSWORD` directly from the environment to call the client outside the MCP layer — those env vars are dev-only and not consumed by the server itself.
+
+## Per-user auth
+
+- Implemented as a `ClientPool` in [server.py](src/appflowy_mcp/server.py).
+- Reads headers from `ctx.request_context.request.headers` (FastMCP exposes the underlying Starlette `Request` to tool handlers).
+- Cache key is `(email, password)`. A password change creates a fresh entry; the old one stays in memory until process restart (acceptable for the team-scale we target).
+- Each cached `AppFlowyClient` has its own `_auth_lock`, so parallel calls from the same user serialise only across refresh, not normal requests.
+- TLS must be terminated in front of the server when exposed beyond localhost (credentials are in headers on every request). Currently we run plain HTTP on `:8765`; production requires an nginx route or sidecar.
 
 ## AppFlowy document Y.Doc schema
 
@@ -121,7 +130,7 @@ The attempt to switch to `POST /v1/.../web-update` (the realtime channel AppFlow
 ## How to add a new tool
 
 1. Method in [client.py](src/appflowy_mcp/client.py) — calls the relevant AppFlowy endpoint.
-2. `@mcp.tool()` in [server.py](src/appflowy_mcp/server.py) — the docstring is **critical** (the LLM uses it to decide when to call the tool and what arguments to pass).
+2. `@mcp.tool()` in [server.py](src/appflowy_mcp/server.py) — the docstring is **critical** (the LLM uses it to decide when to call the tool and what arguments to pass). **Take `ctx: Context` as the first parameter** and call `client = await pool.get(ctx)` at the top of the body to obtain the per-user `AppFlowyClient`.
 3. Bump `version` in [pyproject.toml](pyproject.toml) and the tag in [../appflowy-cloud/docker-compose.override.yml](../appflowy-cloud/docker-compose.override.yml).
 4. `docker compose build appflowy_mcp && docker compose up -d appflowy_mcp`.
 5. Append to [CHANGELOG.md](CHANGELOG.md).

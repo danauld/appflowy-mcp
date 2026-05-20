@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "appflowy-mcp"
-version = "0.7.2"
+version = "0.8.0"
 description = "MCP server for AppFlowy-Cloud — lets LLMs read pages from a self-hosted AppFlowy instance"
 requires-python = ">=3.10"
 dependencies = [

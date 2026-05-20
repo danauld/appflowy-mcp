@@ -1,6 +1,7 @@
 """Bypass MCP layer; exercise the AppFlowy HTTP client directly."""
 import asyncio
 import json
+import os
 import sys
 
 from dotenv import load_dotenv
@@ -19,11 +20,13 @@ def dump(label: str, obj) -> None:
 async def main() -> None:
     load_dotenv()
     cfg = Config.from_env()
-    print(f"Connecting to {cfg.base_url} as {cfg.email} (verify={cfg.tls_verify})")
+    email = os.environ["APPFLOWY_BOT_EMAIL"]
+    password = os.environ["APPFLOWY_BOT_PASSWORD"]
+    print(f"Connecting to {cfg.base_url} as {email} (verify={cfg.tls_verify})")
     client = AppFlowyClient(
         base_url=cfg.base_url,
-        email=cfg.email,
-        password=cfg.password,
+        email=email,
+        password=password,
         verify=cfg.tls_verify,
     )
     try:
