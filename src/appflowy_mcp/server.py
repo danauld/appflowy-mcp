@@ -1,4 +1,5 @@
 import asyncio
+import re
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -6,7 +7,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from .client import AppFlowyClient
 from .config import Config
 from .doc_builder import build_document
-from .markdown import render_document
+from .markdown import extract_plain_text, render_document
 from .markdown_to_blocks import parse as parse_markdown
 
 
@@ -32,6 +33,78 @@ def _trim_folder_view(node: dict[str, Any]) -> dict[str, Any]:
         "icon": node.get("icon"),
         "children": [_trim_folder_view(c) for c in node.get("children") or []],
     }
+
+
+def _collect_document_pages(
+    node: dict[str, Any], path: list[str], out: list[dict[str, str]]
+) -> None:
+    """Flatten the folder tree to a list of Document-layout pages with a
+    breadcrumb path. The workspace root (the top-level node) is skipped as it
+    has no view content."""
+    name = node.get("name") or ""
+    is_root = not path and not name
+    new_path = path if is_root else path + [name]
+    if (
+        node.get("layout") == 0
+        and not node.get("is_space")
+        and node.get("view_id")
+    ):
+        out.append(
+            {
+                "view_id": node["view_id"],
+                "name": name,
+                "path": " / ".join(new_path),
+            }
+        )
+    for child in node.get("children") or []:
+        _collect_document_pages(child, new_path, out)
+
+
+def _find_matches(
+    text: str, query: str, case_sensitive: bool, use_regex: bool
+) -> tuple[int, int, int] | None:
+    """Return (first_start, first_end, total_count) or None if no match."""
+    if not text or not query:
+        return None
+    if use_regex:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        try:
+            pattern = re.compile(query, flags)
+        except re.error:
+            return None
+        matches = list(pattern.finditer(text))
+        if not matches:
+            return None
+        m = matches[0]
+        return (m.start(), m.end(), len(matches))
+    haystack = text if case_sensitive else text.lower()
+    needle = query if case_sensitive else query.lower()
+    first = haystack.find(needle)
+    if first < 0:
+        return None
+    count = 0
+    pos = 0
+    nlen = len(needle)
+    while True:
+        j = haystack.find(needle, pos)
+        if j < 0:
+            break
+        count += 1
+        pos = j + nlen
+    return (first, first + nlen, count)
+
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _make_snippet(text: str, start: int, end: int, snippet_chars: int) -> str:
+    half = max(20, snippet_chars // 2)
+    left = max(0, start - half)
+    right = min(len(text), end + half)
+    snippet = _WHITESPACE_RE.sub(" ", text[left:right]).strip()
+    prefix = "..." if left > 0 else ""
+    suffix = "..." if right < len(text) else ""
+    return f"{prefix}{snippet}{suffix}"
 
 
 class ClientPool:
@@ -264,5 +337,103 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
             workspace_id, view_id, encoded, collab_type=0
         )
         return {"view_id": view_id, "blocks_written": len(blocks)}
+
+    @mcp.tool()
+    async def search_pages(
+        ctx: Context,
+        workspace_id: str,
+        query: str,
+        max_results: int = 20,
+        case_sensitive: bool = False,
+        use_regex: bool = False,
+        snippet_chars: int = 200,
+    ) -> dict[str, Any]:
+        """Search Document-page contents in a workspace for a query string.
+
+        Walks every Document-layout page reachable in the folder tree, scans its
+        plain text (stripped of markdown formatting), and returns short snippets
+        around the first match for each hit page. Pages with no match are
+        omitted. Results are sorted by match_count descending.
+
+        Use this to locate relevant pages cheaply, then call read_page() on the
+        view_ids that look most promising. The server walks all pages
+        internally; only snippets travel back — full page bodies stay on the
+        server until you ask for them.
+
+        Tips:
+        - Refine queries iteratively: a broad term gives many hits, then narrow.
+        - Set use_regex=True for alternations like "auth(orize|enticate)".
+        - Increase snippet_chars if you need more surrounding context.
+
+        Args:
+            workspace_id: Workspace UUID (from list_workspaces).
+            query: Substring (default) or Python regex pattern. Empty string
+                returns no matches.
+            max_results: Cap on number of hit pages returned. Default 20.
+            case_sensitive: Default false.
+            use_regex: Treat query as a Python regex. Default false. Invalid
+                regex returns an error field, not raises.
+            snippet_chars: Approximate snippet width per match (split before
+                and after the match). Default 200.
+
+        Returns: {
+            query, workspace_id, total_pages_scanned, total_matches,
+            matches: [{view_id, name, path, snippet, match_count}, ...],
+            error?: str,  # only on invalid regex
+        }
+        """
+        if use_regex:
+            try:
+                re.compile(query)
+            except re.error as exc:
+                return {
+                    "query": query,
+                    "workspace_id": workspace_id,
+                    "total_pages_scanned": 0,
+                    "total_matches": 0,
+                    "matches": [],
+                    "error": f"invalid regex: {exc}",
+                }
+
+        client = await pool.get(ctx)
+        folder = await client.get_folder(workspace_id, depth=10)
+        pages: list[dict[str, str]] = []
+        _collect_document_pages(folder, [], pages)
+
+        semaphore = asyncio.Semaphore(8)
+
+        async def scan(info: dict[str, str]) -> dict[str, Any] | None:
+            async with semaphore:
+                try:
+                    decoded = await client.get_document_decoded(
+                        workspace_id, info["view_id"]
+                    )
+                except Exception:
+                    return None
+            text = extract_plain_text(decoded)
+            if not text:
+                return None
+            hit = _find_matches(text, query, case_sensitive, use_regex)
+            if hit is None:
+                return None
+            start, end, count = hit
+            return {
+                "view_id": info["view_id"],
+                "name": info["name"],
+                "path": info["path"],
+                "snippet": _make_snippet(text, start, end, snippet_chars),
+                "match_count": count,
+            }
+
+        results = await asyncio.gather(*(scan(p) for p in pages))
+        matches = [r for r in results if r is not None]
+        matches.sort(key=lambda r: r["match_count"], reverse=True)
+        return {
+            "query": query,
+            "workspace_id": workspace_id,
+            "total_pages_scanned": len(pages),
+            "total_matches": len(matches),
+            "matches": matches[: max(0, max_results)],
+        }
 
     return mcp, pool

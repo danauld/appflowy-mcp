@@ -2,6 +2,20 @@
 
 Version history of `appflowy-mcp`. Format is informal; we record what changed and why.
 
+## 0.9.0 — 2026-05-21
+
+### Added
+- `search_pages(workspace_id, query, ...)` tool. Walks every Document-layout page in the workspace, scans plain text (formatting stripped), returns short snippets per matching page sorted by match count. Pages with no match are omitted; full bodies stay on the server until the client explicitly calls `read_page`.
+- Supports substring (default) and Python regex (`use_regex=True`), case-sensitive flag, and a tunable snippet width (`snippet_chars`).
+- New `extract_plain_text(collab_json)` helper in [markdown.py](src/appflowy_mcp/markdown.py): document text without markdown marks (so a query like `*foo*` does not false-positive on italics rendering).
+
+### Design notes
+- Cost model: server walks all pages and decodes each Y.Doc with pycrdt; the agent only pays tokens for the returned snippets. Concurrency capped at 8 in-flight fetches per call to avoid hammering AppFlowy. No cache yet — every call re-walks. Acceptable at team scale (a few hundred pages); revisit when latency starts to bite.
+- Why a custom search and not `GET /api/search/{workspace_id}`: the native endpoint is semantic (OpenAI embeddings) and requires the `appflowy_ai` service + an API key, which we deliberately keep stopped. Substring search covers the "find me everything about X" workflow without any token spend on the server side.
+
+### Reminder
+- New tool — every Claude Code (or other MCP) client must restart its session after pulling the new image. The tool list is requested at connect time.
+
 ## 0.8.0 — 2026-05-20 — **breaking**
 
 ### Changed

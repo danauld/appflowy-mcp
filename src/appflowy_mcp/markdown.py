@@ -73,6 +73,68 @@ def _block_text(block: dict[str, Any], text_map: dict[str, str]) -> str:
     return _delta_to_string(raw)
 
 
+def _delta_to_plain(raw: str) -> str:
+    """Like _delta_to_string but drops all formatting marks — returns just the
+    concatenated `insert` strings. Used by search to avoid false positives on
+    markdown syntax (e.g. searching for `*foo` would otherwise hit italics)."""
+    if not raw:
+        return ""
+    if not (raw.startswith("[") and raw.endswith("]")):
+        return raw
+    try:
+        ops = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    if not isinstance(ops, list):
+        return raw
+    parts: list[str] = []
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        ins = op.get("insert")
+        if isinstance(ins, str):
+            parts.append(ins)
+    return "".join(parts)
+
+
+def extract_plain_text(collab_json: dict[str, Any]) -> str:
+    """Flatten a decoded Document's text into a single newline-joined string.
+
+    Walks the block tree in document order, drops formatting, and concatenates
+    each block's text on its own line. Image alt-text and code-block bodies
+    are included; structural marks (heading `#`, bullets `-`, etc) are not.
+    """
+    doc = (collab_json or {}).get("collab", {}).get("document") or {}
+    blocks = doc.get("blocks") or {}
+    meta = doc.get("meta") or {}
+    children_map = meta.get("children_map") or {}
+    text_map = meta.get("text_map") or {}
+    page_id = doc.get("page_id")
+    if not page_id or page_id not in blocks:
+        return ""
+
+    out: list[str] = []
+
+    def walk(block_id: str) -> None:
+        block = blocks.get(block_id)
+        if not block:
+            return
+        ext_id = block.get("external_id")
+        if ext_id:
+            raw = text_map.get(ext_id, "")
+            if isinstance(raw, str):
+                text = _delta_to_plain(raw)
+                if text:
+                    out.append(text)
+        children_key = block.get("children")
+        if children_key:
+            for child_id in children_map.get(children_key, []):
+                walk(child_id)
+
+    walk(page_id)
+    return "\n".join(out)
+
+
 def _block_data(block: dict[str, Any]) -> dict[str, Any]:
     raw = block.get("data")
     if not raw:
