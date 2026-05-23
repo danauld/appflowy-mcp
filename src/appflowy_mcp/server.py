@@ -103,6 +103,82 @@ def _find_matches(
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
+def _find_parent_and_siblings(
+    node: dict[str, Any], target: str
+) -> tuple[str, list[str]] | None:
+    """Locate `target` view_id in the folder tree.
+
+    Returns (parent_view_id, sibling_view_ids_in_order) where the siblings
+    list includes the target itself. Returns None if not found.
+    """
+    children = node.get("children") or []
+    for child in children:
+        if child.get("view_id") == target:
+            siblings = [c["view_id"] for c in children if c.get("view_id")]
+            return node.get("view_id"), siblings
+        found = _find_parent_and_siblings(child, target)
+        if found is not None:
+            return found
+    return None
+
+
+def _find_node(node: dict[str, Any], target: str) -> dict[str, Any] | None:
+    if node.get("view_id") == target:
+        return node
+    for child in node.get("children") or []:
+        found = _find_node(child, target)
+        if found is not None:
+            return found
+    return None
+
+
+def _resolve_prev_view_id(
+    siblings: list[str], moving_view_id: str, position: str
+) -> tuple[str | None, str | None]:
+    """Translate a position spec into the `prev_view_id` AppFlowy expects.
+
+    Siblings should be the children of the destination parent IN CURRENT ORDER.
+    If the moving page is already among them, it is treated as removed first.
+
+    Position spec:
+      - "top"             → first child (prev_view_id = None)
+      - "bottom"          → last child
+      - "after:<id>"      → directly after the named sibling
+      - "before:<id>"     → directly before the named sibling
+
+    Returns (prev_view_id, error). Exactly one is None.
+    """
+    others = [s for s in siblings if s != moving_view_id]
+    pos = position.strip()
+    if pos == "top":
+        return None, None
+    if pos == "bottom":
+        return (others[-1] if others else None), None
+    if ":" in pos:
+        kind, _, anchor = pos.partition(":")
+        kind = kind.strip().lower()
+        anchor = anchor.strip()
+        if kind not in ("after", "before"):
+            return None, f"unknown position kind {kind!r}; use 'after:' or 'before:'"
+        if not anchor:
+            return None, f"position {position!r} is missing the anchor view_id"
+        if anchor == moving_view_id:
+            return None, f"position references the moving page itself ({anchor})"
+        if anchor not in others:
+            return (
+                None,
+                f"anchor view_id {anchor} is not a sibling under the destination parent",
+            )
+        if kind == "after":
+            return anchor, None
+        idx = others.index(anchor)
+        return (others[idx - 1] if idx > 0 else None), None
+    return None, (
+        f"unknown position {position!r}; "
+        "expected one of 'top', 'bottom', 'after:<view_id>', 'before:<view_id>'"
+    )
+
+
 def _make_snippet(text: str, start: int, end: int, snippet_chars: int) -> str:
     half = max(20, snippet_chars // 2)
     left = max(0, start - half)
@@ -305,6 +381,114 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
         client = await pool.get(ctx)
         await client.rename_page(workspace_id, view_id, new_name)
         return {"view_id": view_id, "name": new_name}
+
+    @mcp.tool()
+    async def reorder_page(
+        ctx: Context,
+        workspace_id: str,
+        view_id: str,
+        position: str,
+    ) -> dict[str, Any]:
+        """Reorder a page within its current parent (same section).
+
+        Use this to pin a page to the top of its section, drop it to the bottom,
+        or slot it next to a specific sibling. To change the parent itself
+        (move across sections), use `move_page` instead.
+
+        Position syntax:
+          - "top"              — first among siblings
+          - "bottom"           — last among siblings
+          - "after:<view_id>"  — directly after the named sibling
+          - "before:<view_id>" — directly before the named sibling
+
+        Anchor view_ids for "after:" / "before:" must be siblings under the
+        same parent. Call `list_pages` to look them up.
+
+        Args:
+            workspace_id: Workspace UUID (from list_workspaces).
+            view_id: Page UUID (from list_pages) — the page to move.
+            position: One of the strings above.
+
+        Returns: { view_id, parent_view_id, position, prev_view_id } on success,
+                 { error } on bad position / page not found.
+        """
+        client = await pool.get(ctx)
+        folder = await client.get_folder(workspace_id, depth=10)
+        found = _find_parent_and_siblings(folder, view_id)
+        if found is None:
+            return {"error": f"view_id {view_id} not found in workspace folder tree"}
+        parent_view_id, siblings = found
+        if parent_view_id is None:
+            return {"error": f"view_id {view_id} has no parent (is it the workspace root?)"}
+        prev_view_id, err = _resolve_prev_view_id(siblings, view_id, position)
+        if err is not None:
+            return {"error": err}
+        await client.move_page(workspace_id, view_id, parent_view_id, prev_view_id)
+        return {
+            "view_id": view_id,
+            "parent_view_id": parent_view_id,
+            "position": position,
+            "prev_view_id": prev_view_id,
+        }
+
+    @mcp.tool()
+    async def move_page(
+        ctx: Context,
+        workspace_id: str,
+        view_id: str,
+        new_parent_view_id: str,
+        position: str = "top",
+    ) -> dict[str, Any]:
+        """Move a page under a different parent (cross-section move).
+
+        Use this to relocate a page into another space or under another page.
+        To merely reorder within the current parent, use `reorder_page`.
+
+        Position syntax (same as `reorder_page`, resolved against the *new*
+        parent's children):
+          - "top" (default)    — first child of the new parent
+          - "bottom"           — last child of the new parent
+          - "after:<view_id>"  — directly after the named sibling
+          - "before:<view_id>" — directly before the named sibling
+
+        The server rejects moves into a page's own descendant (would create a
+        cycle); the error is surfaced as-is.
+
+        Args:
+            workspace_id: Workspace UUID (from list_workspaces).
+            view_id: Page UUID — the page to move.
+            new_parent_view_id: Destination parent's view_id. Use a space view_id
+                for a top-level slot in that space, or another page's view_id
+                to nest under it.
+            position: Where to place the page under the new parent. Default "top".
+
+        Returns: { view_id, new_parent_view_id, position, prev_view_id } on
+                 success, { error } on bad position / page not found.
+        """
+        client = await pool.get(ctx)
+        folder = await client.get_folder(workspace_id, depth=10)
+        parent_node = _find_node(folder, new_parent_view_id)
+        if parent_node is None:
+            return {
+                "error": f"new_parent_view_id {new_parent_view_id} not found in workspace folder tree"
+            }
+        if _find_node(folder, view_id) is None:
+            return {"error": f"view_id {view_id} not found in workspace folder tree"}
+        siblings = [
+            c["view_id"]
+            for c in (parent_node.get("children") or [])
+            if c.get("view_id")
+        ]
+        prev_view_id, err = _resolve_prev_view_id(siblings, view_id, position)
+        if err is not None:
+            return {"error": err}
+        await client.move_page(workspace_id, view_id, new_parent_view_id, prev_view_id)
+        return {
+            "view_id": view_id,
+            "new_parent_view_id": new_parent_view_id,
+            "position": position,
+            "prev_view_id": prev_view_id,
+        }
 
     @mcp.tool()
     async def replace_page_content(

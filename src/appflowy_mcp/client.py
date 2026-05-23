@@ -175,6 +175,29 @@ class AppFlowyClient:
             json={"name": name},
         )
 
+    async def move_page(
+        self,
+        workspace_id: str,
+        view_id: str,
+        new_parent_view_id: str,
+        prev_view_id: str | None = None,
+    ) -> None:
+        """Move/reorder a page in the folder tree.
+
+        `new_parent_view_id` is the destination parent (use the current parent
+        to reorder in place). `prev_view_id` is the sibling that should come
+        immediately before the moved page after the move; `None` places it
+        first under the new parent.
+        """
+        await self.request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view/{view_id}/move",
+            json={
+                "new_parent_view_id": new_parent_view_id,
+                "prev_view_id": prev_view_id,
+            },
+        )
+
     async def update_page_collab(
         self,
         workspace_id: str,

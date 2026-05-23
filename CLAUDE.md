@@ -6,7 +6,7 @@ An MCP server that gives LLM agents (Claude Code, Cline, Claude Desktop, ...) to
 
 ## What is inside
 
-A thin wrapper around the AppFlowy-Cloud REST API plus native Yrs CRDT document assembly on pycrdt. Per-user auth model: every MCP HTTP request carries `X-AppFlowy-Email` / `X-AppFlowy-Password` headers, and tools run under the caller's AppFlowy identity. No shared bot. 11 MCP tools:
+A thin wrapper around the AppFlowy-Cloud REST API plus native Yrs CRDT document assembly on pycrdt. Per-user auth model: every MCP HTTP request carries `X-AppFlowy-Email` / `X-AppFlowy-Password` headers, and tools run under the caller's AppFlowy identity. No shared bot. 13 MCP tools:
 
 | Tool | What it does | AppFlowy endpoint |
 |---|---|---|
@@ -16,6 +16,8 @@ A thin wrapper around the AppFlowy-Cloud REST API plus native Yrs CRDT document 
 | `search_pages` | substring/regex search across all Document pages → snippets | folder walk + per-page `get_document_decoded` + plain-text extraction; server-side scan, only snippets returned |
 | `create_page` | new empty page | `POST /api/workspace/{ws}/page-view` |
 | `rename_page` | rename | `POST /api/workspace/{ws}/page-view/{view}/update-name` |
+| `reorder_page` | reorder a page within its current parent (top/bottom/after:/before:) | folder walk to find current parent → resolve `prev_view_id` → `POST /api/workspace/{ws}/page-view/{view}/move` |
+| `move_page` | move a page under a different parent (cross-section move) with optional position | folder walk to resolve `prev_view_id` against new parent's children → `POST /api/workspace/{ws}/page-view/{view}/move` |
 | `replace_page_content` | full rewrite from markdown | `PUT /api/workspace/{ws}/collab/{obj}` with a fresh-built `encoded_collab_v1` |
 | `append_to_page` | append markdown to the end of a page (existing content preserved) | load existing `encoded_collab` → mutate root children Y.Array via pycrdt → `PUT` updated full state |
 | `replace_section` | replace one root-level section (heading + body up to next same-or-higher heading) by heading-text match | load existing → find heading → delete range → insert parsed new blocks → `PUT` updated full state |

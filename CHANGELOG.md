@@ -2,6 +2,20 @@
 
 Version history of `appflowy-mcp`. Format is informal; we record what changed and why.
 
+## 0.13.0 — 2026-05-23
+
+### Added
+- `reorder_page(workspace_id, view_id, position)` — reorder a page within its current parent. Position syntax: `"top"`, `"bottom"`, `"after:<view_id>"`, `"before:<view_id>"`. Looks up the current parent in the folder tree, resolves the anchor into the `prev_view_id` AppFlowy expects, calls `POST /api/workspace/{ws}/page-view/{view}/move`.
+- `move_page(workspace_id, view_id, new_parent_view_id, position="top")` — relocate a page under a different parent (cross-section move) with the same position syntax (resolved against the *new* parent's children). Folder-tree lookup validates both the target and the new parent before sending the move request; cycle prevention (no moves under own descendant) is delegated to the server.
+- `AppFlowyClient.move_page(ws, view_id, new_parent_view_id, prev_view_id=None)` — thin client method.
+- Server-side helpers in [server.py](src/appflowy_mcp/server.py): `_find_parent_and_siblings`, `_find_node`, `_resolve_prev_view_id`. The position parser is shared between both tools.
+
+### Why two tools, not one
+The native API is one endpoint (`/move`), but conceptually the two operations are different: "pin this page to the top of its section" (reorder) is the common everyday case, "relocate this page into a different space" (move) is rarer and more disruptive. Splitting them gives the LLM clearer affordances — `reorder_page` doesn't even take a parent_view_id, removing one possible source of confusion. The underlying client method is shared.
+
+### Reminder
+- Two new tools — every Claude Code (or other MCP) client must restart its session after pulling the new image. The tool list is requested at connect time.
+
 ## 0.12.0 — 2026-05-21
 
 ### Added
