@@ -4,7 +4,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from .client import AppFlowyClient
+from .client import AppFlowyClient, AppFlowyError
 from .config import Config
 from .doc_builder import (
     append_blocks_to_document,
@@ -294,7 +294,7 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
         For Document layouts: returns rendered Markdown reconstructed from the
         document's decoded CRDT (blocks + child ordering + text deltas).
         For Grid/Board/Calendar: returns the database schema as JSON
-        (row data not yet exposed via this tool).
+        (use get_database_fields / get_database_rows for columns + row data).
         For Chat or unknown layouts: returns an error.
 
         Args:
@@ -855,5 +855,192 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
             "total_matches": len(matches),
             "matches": matches[: max(0, max_results)],
         }
+
+    # ------------------------------------------------------------------ #
+    # Database tools (Grid / Board / Calendar).                          #
+    #                                                                    #
+    # AppFlowy-Cloud lets you create a database *view* (create_page with #
+    # layout="Grid"/"Board"/"Calendar"), read its fields, and read/write #
+    # rows — but it has NO API to create or define fields/columns/select #
+    # options. So these tools fill and read databases whose columns      #
+    # already exist (a fresh Grid's default Name/Type/Done columns, or   #
+    # columns you set up by hand in the AppFlowy app).                   #
+    # ------------------------------------------------------------------ #
+
+    @mcp.tool()
+    async def list_databases(
+        ctx: Context, workspace_id: str
+    ) -> list[dict[str, Any]]:
+        """List the databases (Grid/Board/Calendar) in a workspace.
+
+        A database is the data object behind one or more Grid/Board/Calendar
+        views. The database_id differs from the folder page's view_id: creating
+        a Grid with create_page() makes a folder page whose child is the
+        database view. Use the database_id (or any view_id) shown here with the
+        other database tools.
+
+        Args:
+            workspace_id: Workspace UUID (from list_workspaces).
+
+        Returns: [{ database_id, views: [{view_id, name, layout}] }]
+        """
+        client = await pool.get(ctx)
+        dbs = await client.list_databases(workspace_id)
+        return [
+            {
+                "database_id": d.get("id"),
+                "views": [
+                    {
+                        "view_id": v.get("view_id"),
+                        "name": v.get("name"),
+                        "layout": _LAYOUT_NAMES.get(
+                            v.get("layout"), v.get("layout")
+                        ),
+                    }
+                    for v in d.get("views") or []
+                ],
+            }
+            for d in dbs
+        ]
+
+    @mcp.tool()
+    async def get_database_fields(
+        ctx: Context, workspace_id: str, database_ref: str
+    ) -> dict[str, Any]:
+        """Read a database's fields (columns) and their types.
+
+        Call this before writing rows — row cells are keyed by field *name*,
+        and for SingleSelect/MultiSelect fields you can only set values that
+        already exist in `options` (AppFlowy has no API to create options).
+
+        Args:
+            workspace_id: Workspace UUID (from list_workspaces).
+            database_ref: A database_id, a database view_id, or the folder
+                view_id create_page() returned for the Grid/Board/Calendar.
+
+        Returns: { database_id, fields: [{name, field_type, is_primary,
+                 options?}] } — `options` present only for select fields.
+        """
+        client = await pool.get(ctx)
+        try:
+            db = await client.resolve_database_id(workspace_id, database_ref)
+        except AppFlowyError as exc:
+            return {"error": str(exc)}
+        fields = await client.get_database_fields(workspace_id, db)
+        out: list[dict[str, Any]] = []
+        for f in fields:
+            entry: dict[str, Any] = {
+                "name": f.get("name"),
+                "field_type": f.get("field_type"),
+                "is_primary": bool(f.get("is_primary")),
+            }
+            content = (f.get("type_option") or {}).get("content")
+            if isinstance(content, dict) and "options" in content:
+                entry["options"] = [
+                    o.get("name") for o in content.get("options") or []
+                ]
+            out.append(entry)
+        return {"database_id": db, "fields": out}
+
+    @mcp.tool()
+    async def get_database_rows(
+        ctx: Context, workspace_id: str, database_ref: str, limit: int = 100
+    ) -> dict[str, Any]:
+        """Read rows from a database.
+
+        Cells come back keyed by field name. Value encodings: text fields →
+        string; Checkbox → true/false; SingleSelect → the option name (or ""
+        when unset); unset cells → null.
+
+        Args:
+            workspace_id: Workspace UUID (from list_workspaces).
+            database_ref: database_id or a view_id (see list_databases).
+            limit: Max rows to return. Default 100.
+
+        Returns: { database_id, total, returned, rows: [{id, cells}] }
+        """
+        client = await pool.get(ctx)
+        try:
+            db = await client.resolve_database_id(workspace_id, database_ref)
+        except AppFlowyError as exc:
+            return {"error": str(exc)}
+        ids = await client.get_database_row_ids(workspace_id, db)
+        total = len(ids)
+        rows = await client.get_database_rows(
+            workspace_id, db, ids[: max(0, limit)]
+        )
+        return {
+            "database_id": db,
+            "total": total,
+            "returned": len(rows),
+            "rows": [
+                {"id": r.get("id"), "cells": r.get("cells")} for r in rows
+            ],
+        }
+
+    @mcp.tool()
+    async def create_database_row(
+        ctx: Context,
+        workspace_id: str,
+        database_ref: str,
+        cells: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Append a new row to a database.
+
+        `cells` maps field NAME → value (call get_database_fields first to see
+        the names). Value encodings: text fields → string; Checkbox →
+        true/false; Number → number or numeric string; SingleSelect/MultiSelect
+        → an EXISTING option name (unknown options are silently dropped —
+        AppFlowy has no API to create options). Omitted fields stay blank.
+
+        Args:
+            workspace_id: Workspace UUID (from list_workspaces).
+            database_ref: database_id or a view_id (see list_databases).
+            cells: { "Field Name": value, ... }.
+
+        Returns: { database_id, row_id } on success, { error } otherwise.
+        """
+        client = await pool.get(ctx)
+        try:
+            db = await client.resolve_database_id(workspace_id, database_ref)
+        except AppFlowyError as exc:
+            return {"error": str(exc)}
+        row_id = await client.create_database_row(workspace_id, db, cells)
+        return {"database_id": db, "row_id": row_id}
+
+    @mcp.tool()
+    async def upsert_database_row(
+        ctx: Context,
+        workspace_id: str,
+        database_ref: str,
+        pre_hash: str,
+        cells: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Idempotently insert-or-update a row keyed by `pre_hash`.
+
+        The row id is derived from `pre_hash`, so calling again with the same
+        `pre_hash` updates the SAME row instead of adding a duplicate. Cells
+        merge: fields you omit on a later call keep their previous value. Ideal
+        for syncing an external record into a grid (use a stable external id as
+        the pre_hash). Same cell encoding and select-option limits as
+        create_database_row.
+
+        Args:
+            workspace_id: Workspace UUID (from list_workspaces).
+            database_ref: database_id or a view_id (see list_databases).
+            pre_hash: Stable key identifying the row (e.g. an external id).
+            cells: { "Field Name": value, ... }.
+
+        Returns: { database_id, row_id } on success, { error } otherwise.
+        """
+        client = await pool.get(ctx)
+        try:
+            db = await client.resolve_database_id(workspace_id, database_ref)
+        except AppFlowyError as exc:
+            return {"error": str(exc)}
+        row_id = await client.upsert_database_row(
+            workspace_id, db, pre_hash, cells
+        )
+        return {"database_id": db, "row_id": row_id}
 
     return mcp, pool

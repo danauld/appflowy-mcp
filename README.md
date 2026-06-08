@@ -25,6 +25,11 @@ admins.
 | `replace_section(workspace_id, view_id, heading, new_markdown, match_index=None)` | Replace one section (heading + body up to next same-or-higher heading) by heading text match. Empty `new_markdown` deletes the section |
 | `insert_after_heading(workspace_id, view_id, heading, markdown_content, match_index=None)` | Insert Markdown blocks at the top of a section (immediately after the matched heading) |
 | `insert_before_heading(workspace_id, view_id, heading, markdown_content, match_index=None)` | Insert Markdown blocks immediately before a heading (end of previous section / before first heading) |
+| `list_databases(workspace_id)` | List Grid/Board/Calendar databases with their views (note: `database_id` ≠ the folder page's view_id) |
+| `get_database_fields(workspace_id, database_ref)` | A database's fields (columns): name, type, primary flag, and select `options` |
+| `get_database_rows(workspace_id, database_ref, limit=100)` | Read rows; cells keyed by field name |
+| `create_database_row(workspace_id, database_ref, cells)` | Append a row (`cells` keyed by field name) |
+| `upsert_database_row(workspace_id, database_ref, pre_hash, cells)` | Idempotent insert-or-update keyed by `pre_hash` (cells merge across calls) |
 
 All write tools accept the same Markdown subset: headings, paragraphs,
 bulleted/numbered/todo lists with indent-based nesting (2 spaces/level), block
@@ -199,8 +204,12 @@ connect time.
   localhost.
 - No delete or move tools. Intentional — destructive operations should be a
   separate opt-in.
-- Database row data (Grid/Board/Calendar contents) is not exposed; only the
-  schema is returned by `read_page`.
+- Database **schema** is read-only via the API. You can create a Grid/Board/
+  Calendar with `create_page` (it ships AppFlowy's default columns) and read/
+  write its rows with the `*_database_*` tools, but AppFlowy-Cloud exposes no
+  endpoint to create or define fields/columns or select options — design
+  columns in the AppFlowy app. SingleSelect/MultiSelect cells can only be set
+  to options that already exist (unknown values are silently dropped to `""`).
 - Writes via `replace_page_content` go through a background DB upsert. If the
   page is open in someone's AppFlowy browser/desktop client at the time, the
   live WebSocket session may overwrite the change — close the page before

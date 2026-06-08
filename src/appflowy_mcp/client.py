@@ -318,3 +318,103 @@ class AppFlowyClient:
             params={"collab_type": str(collab_type)},
         )
         return resp.get("data")
+
+    # ------------------------------------------------------------------ #
+    # Database (Grid / Board / Calendar) — rows & fields.                 #
+    # AppFlowy-Cloud exposes row CRUD + field *reads*; there is no API to #
+    # create or define fields/columns/options, so these operate on a      #
+    # database's existing schema (e.g. a fresh Grid's default columns).    #
+    # ------------------------------------------------------------------ #
+
+    async def list_databases(self, workspace_id: str) -> list[dict[str, Any]]:
+        resp = await self.request(
+            "GET", f"/api/workspace/{workspace_id}/database"
+        )
+        return resp.get("data") or []
+
+    async def resolve_database_id(self, workspace_id: str, ref: str) -> str:
+        """Resolve a database_id from any of: a database_id, a database
+        view_id, or the folder/page view_id that create_page returned for a
+        Grid/Board/Calendar (whose child is the database view)."""
+        dbs = await self.list_databases(workspace_id)
+        for d in dbs:
+            if d.get("id") == ref:
+                return ref
+        for d in dbs:
+            for v in d.get("views") or []:
+                if v.get("view_id") == ref:
+                    return d["id"]
+        # ref may be the folder page create_page returned; its child is the
+        # actual database view.
+        try:
+            sub = await self.get_folder(workspace_id, depth=2, root_view_id=ref)
+        except AppFlowyError:
+            sub = {}
+        child_ids = {c.get("view_id") for c in (sub.get("children") or [])}
+        if child_ids:
+            for d in dbs:
+                for v in d.get("views") or []:
+                    if v.get("view_id") in child_ids:
+                        return d["id"]
+        raise AppFlowyError(
+            f"could not resolve a database from {ref!r}; pass a database_id or "
+            "a Grid/Board/Calendar view_id (see list_databases)"
+        )
+
+    async def get_database_fields(
+        self, workspace_id: str, database_id: str
+    ) -> list[dict[str, Any]]:
+        resp = await self.request(
+            "GET",
+            f"/api/workspace/{workspace_id}/database/{database_id}/fields",
+        )
+        return resp.get("data") or []
+
+    async def get_database_row_ids(
+        self, workspace_id: str, database_id: str
+    ) -> list[str]:
+        resp = await self.request(
+            "GET", f"/api/workspace/{workspace_id}/database/{database_id}/row"
+        )
+        out: list[str] = []
+        for r in resp.get("data") or []:
+            rid = r if isinstance(r, str) else r.get("id")
+            if rid:
+                out.append(rid)
+        return out
+
+    async def get_database_rows(
+        self, workspace_id: str, database_id: str, row_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        if not row_ids:
+            return []
+        resp = await self.request(
+            "GET",
+            f"/api/workspace/{workspace_id}/database/{database_id}/row/detail",
+            params={"ids": ",".join(row_ids)},
+        )
+        return resp.get("data") or []
+
+    async def create_database_row(
+        self, workspace_id: str, database_id: str, cells: dict[str, Any]
+    ) -> str:
+        resp = await self.request(
+            "POST",
+            f"/api/workspace/{workspace_id}/database/{database_id}/row",
+            json={"cells": cells},
+        )
+        return resp.get("data")
+
+    async def upsert_database_row(
+        self,
+        workspace_id: str,
+        database_id: str,
+        pre_hash: str,
+        cells: dict[str, Any],
+    ) -> str:
+        resp = await self.request(
+            "PUT",
+            f"/api/workspace/{workspace_id}/database/{database_id}/row",
+            json={"pre_hash": pre_hash, "cells": cells},
+        )
+        return resp.get("data")

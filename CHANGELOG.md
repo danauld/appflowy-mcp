@@ -2,6 +2,29 @@
 
 Version history of `appflowy-mcp`. Format is informal; we record what changed and why.
 
+## 0.14.0 — 2026-06-08
+
+### Added
+- Five database tools (Grid/Board/Calendar):
+  - `list_databases(workspace_id)` — `GET /api/workspace/{ws}/database`. Lists each database with its views; the `database_id` differs from the folder page view_id.
+  - `get_database_fields(workspace_id, database_ref)` — `GET .../database/{db}/fields`. Returns field names, types, primary flag, and select `options`.
+  - `get_database_rows(workspace_id, database_ref, limit=100)` — `GET .../row` (ids) + `GET .../row/detail?ids=...`. Cells keyed by field name.
+  - `create_database_row(workspace_id, database_ref, cells)` — `POST .../row`. Appends a row; cells keyed by field name.
+  - `upsert_database_row(workspace_id, database_ref, pre_hash, cells)` — `PUT .../row`. Idempotent: the row id is derived from `pre_hash`, so repeat calls update the same row (cells merge).
+- `database_ref` accepts a database_id, a database view_id, OR the folder page view_id that `create_page` returns for a Grid/Board/Calendar — resolved via `AppFlowyClient.resolve_database_id` (matches the database list, else walks one level of the folder tree to the child database view, since a created Grid is a folder page whose child is the database view).
+- Client methods on `AppFlowyClient`: `list_databases`, `resolve_database_id`, `get_database_fields`, `get_database_row_ids`, `get_database_rows`, `create_database_row`, `upsert_database_row`.
+
+### Verified against AppFlowy-Cloud 0.15.19
+- RichText and Checkbox cells write and read back correctly (Checkbox as `true`/`false`).
+- `upsert_database_row` is idempotent and merges cells (a field omitted on a later call keeps its prior value).
+
+### Known limits (AppFlowy-Cloud API, not this server)
+- No endpoint to create a database schema or to create/define fields/columns or select options. You can create a database *view* (`create_page` with `layout="Grid"/"Board"/"Calendar"`, which ships AppFlowy's default columns) and read/write its rows, but column design must be done in the AppFlowy app. Writing a SingleSelect/MultiSelect cell to a non-existent option is silently dropped to `""`.
+- `PUT /row` requires `pre_hash` (upsert-by-key); there is no update-existing-row-by-id endpoint.
+
+### Reminder
+- Five new tools (18 total) — every MCP client must restart/reconnect its session after the new image is deployed. The tool list is requested at connect time.
+
 ## 0.13.0 — 2026-05-23
 
 ### Added
