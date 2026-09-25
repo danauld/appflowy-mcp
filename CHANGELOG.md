@@ -2,6 +2,12 @@
 
 Version history of `appflowy-mcp`. Format is informal; we record what changed and why.
 
+## 0.15.1 — 2026-09-25
+
+### Fixed
+- **Row Collab Root Map Extraction**:
+  - In `apply_row_cells_update`, use `doc.get("data", type=Map)` instead of direct `doc["data"]` indexing so that Y.Docs restored from `get_collab` binary updates properly resolve the root `data` Map rather than returning `None`.
+
 ## 0.15.0 — 2026-09-25
 
 ### Added

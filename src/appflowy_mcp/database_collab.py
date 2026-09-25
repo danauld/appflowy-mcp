@@ -309,13 +309,11 @@ def apply_row_cells_update(
     now = int(time.time())
     with doc.transaction():
         # Ensure root "data" exists
-        if "data" not in doc:
-            doc["data"] = Map({})
-        root = doc["data"]
-        if "data" not in root:
+        root = doc.get("data", type=Map)
+        if "data" not in root or root["data"] is None:
             root["data"] = Map({})
         data_map = root["data"]
-        if "cells" not in data_map:
+        if "cells" not in data_map or data_map["cells"] is None:
             data_map["cells"] = Map({})
         cells_map = data_map["cells"]
 

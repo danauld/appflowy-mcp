@@ -138,11 +138,18 @@ class TestDatabaseCollab(unittest.TestCase):
 
         # Apply update to another Doc and verify
         doc2 = Doc()
-        doc2["data"] = Map({})
         doc2.apply_update(doc.get_update())
-        cells = doc2["data"]["data"]["cells"]
+        cells = doc2.get("data", type=Map)["data"]["cells"]
         self.assertEqual(cells["f1"]["data"], "Initial Title")
         self.assertEqual(cells["f2"]["data"], "true")
+
+        # Apply second update to doc2 (which was populated via apply_update)
+        resolved2 = {"f1": (0, "Updated Title")}
+        update2 = apply_row_cells_update(doc2, resolved2)
+        self.assertTrue(len(update2) > 0)
+        doc.apply_update(update2)
+        root = doc.get("data", type=Map)
+        self.assertEqual(root["data"]["cells"]["f1"]["data"], "Updated Title")
 
     def test_apply_add_select_option(self):
         doc = Doc()
