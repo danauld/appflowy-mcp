@@ -6,23 +6,30 @@ An MCP server that gives LLM agents (Claude Code, Cline, Claude Desktop, ...) to
 
 ## What is inside
 
-A thin wrapper around the AppFlowy-Cloud REST API plus native Yrs CRDT document assembly on pycrdt. Per-user auth model: every MCP HTTP request carries `X-AppFlowy-Email` / `X-AppFlowy-Password` headers, and tools run under the caller's AppFlowy identity. No shared bot. 13 MCP tools:
+A thin wrapper around the AppFlowy-Cloud REST API plus native Yrs CRDT document assembly on pycrdt. Per-user auth model: every MCP HTTP request carries `X-AppFlowy-Email` / `X-AppFlowy-Password` headers, and tools run under the caller's AppFlowy identity. No shared bot. 20 MCP tools:
 
 | Tool | What it does | AppFlowy endpoint |
 |---|---|---|
 | `list_workspaces` | list of the user's workspaces | `GET /api/workspace` |
 | `list_pages` | view tree | `GET /api/workspace/{ws}/folder` |
-| `read_page` | page → markdown | `GET /api/workspace/{ws}/page-view/{view}` + decode raw `encoded_collab` with pycrdt (to preserve deltas) |
+| `read_page` | page / card body → markdown | `GET /api/workspace/{ws}/page-view/{view}` (or row body via `uuid5(row_id, "document_id")`) + decode raw `encoded_collab` with pycrdt |
 | `search_pages` | substring/regex search across all Document pages → snippets | folder walk + per-page `get_document_decoded` + plain-text extraction; server-side scan, only snippets returned |
 | `create_page` | new empty page | `POST /api/workspace/{ws}/page-view` |
 | `rename_page` | rename | `POST /api/workspace/{ws}/page-view/{view}/update-name` |
 | `reorder_page` | reorder a page within its current parent (top/bottom/after:/before:) | folder walk to find current parent → resolve `prev_view_id` → `POST /api/workspace/{ws}/page-view/{view}/move` |
 | `move_page` | move a page under a different parent (cross-section move) with optional position | folder walk to resolve `prev_view_id` against new parent's children → `POST /api/workspace/{ws}/page-view/{view}/move` |
-| `replace_page_content` | full rewrite from markdown | `PUT /api/workspace/{ws}/collab/{obj}` with a fresh-built `encoded_collab_v1` |
-| `append_to_page` | append markdown to the end of a page (existing content preserved) | load existing `encoded_collab` → mutate root children Y.Array via pycrdt → `PUT` updated full state |
-| `replace_section` | replace one root-level section (heading + body up to next same-or-higher heading) by heading-text match | load existing → find heading → delete range → insert parsed new blocks → `PUT` updated full state |
-| `insert_after_heading` | insert new blocks immediately after a root-level heading (top of section) | load existing → find heading → insert parsed new blocks at index+1 → `PUT` updated full state |
-| `insert_before_heading` | insert new blocks immediately before a root-level heading (end of previous section) | load existing → find heading → insert parsed new blocks at index → `PUT` updated full state |
+| `replace_page_content` | full rewrite from markdown (accepts view_id or row_id) | `PUT /api/workspace/{ws}/collab/{obj}` with a fresh-built `encoded_collab_v1` |
+| `append_to_page` | append markdown to the end of a page or card body (existing content preserved) | load existing `encoded_collab` → mutate root children Y.Array via pycrdt → `PUT` updated full state |
+| `replace_section` | replace one root-level section by heading-text match | load existing → find heading → delete range → insert parsed new blocks → `PUT` updated full state |
+| `insert_after_heading` | insert new blocks immediately after a root-level heading | load existing → find heading → insert parsed new blocks at index+1 → `PUT` updated full state |
+| `insert_before_heading` | insert new blocks immediately before a root-level heading | load existing → find heading → insert parsed new blocks at index → `PUT` updated full state |
+| `list_databases` | list databases (Grid/Board/Calendar) | `GET /api/workspace/{ws}/database` |
+| `get_database_fields` | read fields, types, options, and relation target DBs | `GET /api/workspace/{ws}/database/{db}/fields` |
+| `get_database_rows` | read rows with pagination, search, doc bodies, and relation titles | `GET .../row` + `GET .../row/detail` + `collab_type: 4` for relation resolution |
+| `create_database_row` | append a new row | `POST /api/workspace/{ws}/database/{db}/row` |
+| `upsert_database_row` | idempotent insert-or-update keyed by pre_hash | `PUT /api/workspace/{ws}/database/{db}/row` |
+| `update_database_row` | in-place update of an existing row by row ID | `POST .../collab/{row_id}/web-update` (`collab_type: 4`) |
+| `add_select_option` | add option to SingleSelect/MultiSelect column | `POST .../collab/{database_id}/web-update` (`collab_type: 1`) |
 
 ## Folder layout
 
@@ -35,13 +42,16 @@ appflowy-mcp/
 ├── docker-compose.example.yml    # fragment to drop into the AppFlowy-Cloud stack
 ├── .env                          # creds for local dev (gitignored)
 ├── .env.example                  # template
-├── smoke_test.py                 # manual client check bypassing MCP (gitignored output rendered.md/collab_dump.json/etc)
+├── smoke_test.py                 # manual client check bypassing MCP
+├── tests/                        # unit tests
+│   └── test_v015.py
 └── src/appflowy_mcp/
     ├── __init__.py
     ├── __main__.py               # entry point: loads .env, runs FastMCP
     ├── config.py                 # env vars → Config dataclass
     ├── client.py                 # async httpx + auth (token cache/refresh + verify bootstrap)
     ├── server.py                 # FastMCP server + tool definitions
+    ├── database_collab.py        # database & row CRDT manipulation (relations, select options, in-place edit)
     ├── markdown.py               # AppFlowy JSON AST → markdown (for read_page)
     ├── markdown_to_blocks.py     # markdown → AppFlowy block tree (for write)
     ├── doc_builder.py            # block tree → pycrdt Y.Doc → bincode bytes

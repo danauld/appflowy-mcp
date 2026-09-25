@@ -16,20 +16,24 @@ admins.
 |---|---|
 | `list_workspaces()` | All workspaces the calling user can see |
 | `list_pages(workspace_id, depth=10)` | Folder tree of a workspace |
-| `read_page(workspace_id, view_id)` | Document content as Markdown (or Grid/Board schema as JSON) |
+| `read_page(workspace_id, view_id)` | Document content as Markdown (or Grid/Board schema as JSON). Accepts either a page `view_id` OR a card's `row_id` |
 | `search_pages(workspace_id, query, max_results=20, case_sensitive=False, use_regex=False, snippet_chars=200)` | Substring/regex search across every Document page → snippets with hit counts; lets the agent locate pages without `read_page`-ing all of them |
 | `create_page(workspace_id, parent_view_id, name, layout="Document")` | Create an empty page |
 | `rename_page(workspace_id, view_id, new_name)` | Rename a page |
-| `replace_page_content(workspace_id, view_id, markdown_content)` | Replace a Document page's body with Markdown (full rewrite — existing content lost) |
-| `append_to_page(workspace_id, view_id, markdown_content)` | Append Markdown blocks at the end of a page (existing content preserved) |
-| `replace_section(workspace_id, view_id, heading, new_markdown, match_index=None)` | Replace one section (heading + body up to next same-or-higher heading) by heading text match. Empty `new_markdown` deletes the section |
-| `insert_after_heading(workspace_id, view_id, heading, markdown_content, match_index=None)` | Insert Markdown blocks at the top of a section (immediately after the matched heading) |
-| `insert_before_heading(workspace_id, view_id, heading, markdown_content, match_index=None)` | Insert Markdown blocks immediately before a heading (end of previous section / before first heading) |
+| `reorder_page(workspace_id, view_id, position)` | Reorder a page within its current parent (`top`, `bottom`, `after:<id>`, `before:<id>`) |
+| `move_page(workspace_id, view_id, new_parent_view_id, position="top")` | Move a page under a different parent space or page |
+| `replace_page_content(workspace_id, view_id, markdown_content)` | Replace a Document page's or card body's content with Markdown (full rewrite — accepts view_id or row_id) |
+| `append_to_page(workspace_id, view_id, markdown_content)` | Append Markdown blocks at the end of a page or card body (existing content preserved; accepts view_id or row_id) |
+| `replace_section(workspace_id, view_id, heading, new_markdown, match_index=None)` | Replace one section by heading text match. Empty `new_markdown` deletes the section (accepts view_id or row_id) |
+| `insert_after_heading(workspace_id, view_id, heading, markdown_content, match_index=None)` | Insert Markdown blocks immediately after the matched heading (accepts view_id or row_id) |
+| `insert_before_heading(workspace_id, view_id, heading, markdown_content, match_index=None)` | Insert Markdown blocks immediately before a heading (accepts view_id or row_id) |
 | `list_databases(workspace_id)` | List Grid/Board/Calendar databases with their views (note: `database_id` ≠ the folder page's view_id) |
-| `get_database_fields(workspace_id, database_ref)` | A database's fields (columns): name, type, primary flag, and select `options` |
-| `get_database_rows(workspace_id, database_ref, limit=100)` | Read rows; cells keyed by field name |
+| `get_database_fields(workspace_id, database_ref)` | A database's fields (columns): id, name, type, primary flag, select `options`, and `relation_database_id` |
+| `get_database_rows(workspace_id, database_ref, limit=100, offset=0, search=None, with_doc=False)` | Read rows with pagination, search, resolved relation records `[{id, title}]`, and optional markdown card body |
 | `create_database_row(workspace_id, database_ref, cells)` | Append a row (`cells` keyed by field name) |
 | `upsert_database_row(workspace_id, database_ref, pre_hash, cells)` | Idempotent insert-or-update keyed by `pre_hash` (cells merge across calls) |
+| `update_database_row(workspace_id, database_ref, row_id, cells)` | In-place update of an existing row's cells by row ID |
+| `add_select_option(workspace_id, database_ref, field_ref, name, color="Purple")` | Add an option to a SingleSelect or MultiSelect field |
 
 All write tools accept the same Markdown subset: headings, paragraphs,
 bulleted/numbered/todo lists with indent-based nesting (2 spaces/level), block

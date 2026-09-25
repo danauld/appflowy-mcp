@@ -2,6 +2,7 @@ import asyncio
 import json as _json
 import time
 from typing import Any
+import uuid
 
 import httpx
 from pycrdt import Doc, Map
@@ -246,6 +247,23 @@ class AppFlowyClient:
             },
         )
 
+    @staticmethod
+    def row_to_document_id(row_id: str) -> str:
+        """A database row's body document is a separate collab; AppFlowy derives
+        its object id as uuid5(row_uuid, 'document_id')."""
+        return str(uuid.uuid5(uuid.UUID(str(row_id)), "document_id"))
+
+    async def get_collab(
+        self, workspace_id: str, object_id: str, collab_type: int
+    ) -> dict[str, Any]:
+        """Read any collab's encoded state (0 Document, 1 Database, 4 DatabaseRow)."""
+        resp = await self.request(
+            "GET",
+            f"/api/workspace/v1/{workspace_id}/collab/{object_id}",
+            params={"collab_type": str(collab_type)},
+        )
+        return resp.get("data") or {}
+
     async def get_document_decoded(
         self, workspace_id: str, view_id: str
     ) -> dict[str, Any]:
@@ -255,15 +273,43 @@ class AppFlowyClient:
         preserve inline formatting (as JSON-serialized Yjs deltas where present;
         plain strings where the text has no formatting).
         """
-        page = await self.get_page_view(workspace_id, view_id)
-        raw = bytes(page.get("data", {}).get("encoded_collab") or b"")
+        page: dict[str, Any] = {}
+        try:
+            page = await self.get_page_view(workspace_id, view_id)
+        except AppFlowyError:
+            try:
+                doc_id = self.row_to_document_id(view_id)
+                page = await self.get_page_view(workspace_id, doc_id)
+            except Exception:
+                pass
+        raw = bytes(
+            page.get("data", {}).get("encoded_collab")
+            or page.get("encoded_collab")
+            or b""
+        )
+        if not raw:
+            # Fallback: check raw collab endpoint
+            for target_id in (view_id, self.row_to_document_id(view_id)):
+                try:
+                    cdata = await self.get_collab(
+                        workspace_id, target_id, collab_type=0
+                    )
+                    ds = cdata.get("doc_state")
+                    if ds:
+                        raw = bytes(ds)
+                        break
+                except Exception:
+                    pass
         if not raw:
             return {}
 
         doc = Doc()
         doc["data"] = Map({})
         doc.apply_update(raw)
-        document = doc["data"]["document"]
+        root = doc.get("data", type=Map)
+        if "document" not in root:
+            return {}
+        document = root["document"]
 
         blocks_out: dict[str, dict[str, Any]] = {}
         blocks_map = document["blocks"]
@@ -384,14 +430,21 @@ class AppFlowyClient:
         return out
 
     async def get_database_rows(
-        self, workspace_id: str, database_id: str, row_ids: list[str]
+        self,
+        workspace_id: str,
+        database_id: str,
+        row_ids: list[str],
+        with_doc: bool = False,
     ) -> list[dict[str, Any]]:
         if not row_ids:
             return []
+        params: dict[str, Any] = {"ids": ",".join(row_ids)}
+        if with_doc:
+            params["with_doc"] = "true"
         resp = await self.request(
             "GET",
             f"/api/workspace/{workspace_id}/database/{database_id}/row/detail",
-            params={"ids": ",".join(row_ids)},
+            params=params,
         )
         return resp.get("data") or []
 
@@ -418,3 +471,84 @@ class AppFlowyClient:
             json={"pre_hash": pre_hash, "cells": cells},
         )
         return resp.get("data")
+
+    async def update_database_row(
+        self,
+        workspace_id: str,
+        database_id: str,
+        row_id: str,
+        cells: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Update an existing row's cells in place via CRDT."""
+        from .database_collab import (
+            apply_row_cells_update,
+            decode_collab_doc,
+            resolve_cells_dict,
+        )
+
+        fields = await self.get_database_fields(workspace_id, database_id)
+        resolved = resolve_cells_dict(fields, cells)
+        raw_collab = await self.get_collab(workspace_id, row_id, collab_type=4)
+        doc = decode_collab_doc(raw_collab)
+        update_bytes = apply_row_cells_update(doc, resolved)
+        if update_bytes:
+            await self.apply_doc_update_web(
+                workspace_id, row_id, update_bytes, collab_type=4
+            )
+        return {
+            "database_id": database_id,
+            "row_id": row_id,
+            "updated_fields": list(cells.keys()),
+        }
+
+    async def add_select_option(
+        self,
+        workspace_id: str,
+        database_id: str,
+        field_ref: str,
+        name: str,
+        color: str = "Purple",
+    ) -> dict[str, Any]:
+        """Add an option to a SingleSelect or MultiSelect field in a database."""
+        from .database_collab import (
+            apply_add_select_option,
+            decode_collab_doc,
+            get_field_type_int,
+        )
+
+        fields = await self.get_database_fields(workspace_id, database_id)
+        field = None
+        for f in fields:
+            if str(f.get("id")) == str(field_ref) or str(f.get("name")) == str(field_ref):
+                field = f
+                break
+        if field is None:
+            avail = ", ".join(repr(f.get("name")) for f in fields if f.get("name"))
+            raise AppFlowyError(
+                f"field {field_ref!r} not found in database; available fields: {avail}"
+            )
+        fid = str(field["id"])
+        fty = get_field_type_int(field)
+        if fty not in (3, 4):
+            raise AppFlowyError(
+                f"field {field.get('name')!r} is not a SingleSelect or MultiSelect field"
+            )
+
+        raw_collab = await self.get_collab(workspace_id, database_id, collab_type=1)
+        doc = decode_collab_doc(raw_collab)
+        opt_id, is_existing, update_bytes = apply_add_select_option(
+            doc, fid, fty, name, color
+        )
+        if update_bytes:
+            await self.apply_doc_update_web(
+                workspace_id, database_id, update_bytes, collab_type=1
+            )
+        return {
+            "database_id": database_id,
+            "field_id": fid,
+            "field_name": field.get("name"),
+            "option_id": opt_id,
+            "name": name,
+            "color": color,
+            "existing": is_existing,
+        }

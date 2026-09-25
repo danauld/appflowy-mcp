@@ -2,6 +2,27 @@
 
 Version history of `appflowy-mcp`. Format is informal; we record what changed and why.
 
+## 0.15.0 — 2026-09-25
+
+### Added
+- **Database Row Body Document Auto-Resolution**:
+  - `read_page(workspace_id, view_id)` now transparently accepts either a document page `view_id` OR a database card's `row_id`. A `row_id` is automatically mapped to its hidden body document collab at `uuid5(row_id, "document_id")`.
+  - Uninitialized/empty row cards return `content_markdown: ""` and `empty: True` instead of erroring with `"layout None is not readable as a document"`.
+  - Document write tools (`replace_page_content`, `append_to_page`, `replace_section`, `insert_after_heading`, `insert_before_heading`) now also accept a card's `row_id` directly, allowing agents to edit card checklists, notes, and body text without needing to manually look up or compute the internal collab ID.
+- **Enhanced `get_database_rows`**:
+  - Added `offset: int = 0` (skip N rows) and `search: str | None = None` (filter rows by case-insensitive cell content or ID).
+  - Added `with_doc: bool = False`: when True, each returned row includes `content_markdown` with the card's body text rendered to markdown in a single call.
+  - **Relation Field Resolution**: AppFlowy's `/row/detail` REST endpoint omits Relation fields. `get_database_rows` now reads relation cells directly from the row collab (`collab_type: 4`) and resolves linked row IDs to primary field card titles (e.g. `[{"id": "...", "title": "..."}]`) against target databases.
+- **In-Place Row Cell Updating (`update_database_row`)**:
+  - `update_database_row(workspace_id, database_ref, row_id, cells)`: updates existing row cells by row ID in-place via CRDT mutation and `/web-update` (`collab_type: 4`). Does not require `pre_hash`; merges changes and leaves unspecified fields untouched.
+- **Select Option Creation (`add_select_option`)**:
+  - `add_select_option(workspace_id, database_ref, field_ref, name, color="Purple")`: dynamically appends a new option to SingleSelect or MultiSelect columns via database collab mutation (`collab_type: 1`). Idempotent by option name; supports all 20 AppFlowy select colors.
+- **Enhanced `get_database_fields`**:
+  - Exposes field `id` and `relation_database_id` (the target database for Relation fields).
+- **CRDT / Collab Architecture (`src/appflowy_mcp/database_collab.py`)**:
+  - Dedicated module for database and row CRDT operations: `parse_relation_row_ids`, `extract_collab_cells`, `resolve_cells_dict`, `apply_row_cells_update`, `apply_add_select_option`.
+  - Pinned `mcp>=1.2,<2` in `pyproject.toml` to protect against breaking v2 upstream changes.
+
 ## 0.14.0 — 2026-06-08
 
 ### Added
