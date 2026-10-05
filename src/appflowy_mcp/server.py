@@ -9,6 +9,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from .client import AppFlowyClient, AppFlowyError
 from .config import Config
 from .database_collab import (
+    split_cells_for_rest,
     FIELD_TYPE_NAMES,
     extract_collab_cells,
     get_field_select_options,
@@ -1302,6 +1303,40 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
             ],
         }
 
+    async def _write_row_via_rest(
+        client: AppFlowyClient,
+        workspace_id: str,
+        db: str,
+        cells: dict[str, Any],
+        pre_hash: str | None,
+    ) -> dict[str, Any]:
+        """Shared body of create/upsert: validate, REST-write the plain cells,
+        then write Relation cells through the row collab."""
+        fields = await client.get_database_fields(workspace_id, db)
+        try:
+            rest_cells, relation_cells = split_cells_for_rest(fields, cells)
+        except ValueError as exc:
+            return {"database_id": db, "error": str(exc)}
+        if pre_hash is None:
+            row_id = await client.create_database_row(workspace_id, db, rest_cells)
+        else:
+            row_id = await client.upsert_database_row(
+                workspace_id, db, pre_hash, rest_cells
+            )
+        out: dict[str, Any] = {"database_id": db, "row_id": row_id}
+        if relation_cells and row_id:
+            try:
+                await client.update_database_row(
+                    workspace_id, db, row_id, relation_cells
+                )
+                out["relations_written"] = sorted(relation_cells)
+            except Exception as exc:
+                out["error"] = (
+                    f"row written but Relation cells failed: {exc}; "
+                    "retry them with update_database_row"
+                )
+        return out
+
     @mcp.tool()
     async def create_database_row(
         ctx: Context,
@@ -1311,26 +1346,34 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
     ) -> dict[str, Any]:
         """Append a new row to a database.
 
-        `cells` maps field NAME → value (call get_database_fields first to see
-        the names). Value encodings: text fields → string; Checkbox →
-        true/false; Number → number or numeric string; SingleSelect/MultiSelect
-        → an EXISTING option name (unknown options are silently dropped —
-        use add_select_option to create options first). Omitted fields stay blank.
+        Every call adds a row, even one with the same Name as an existing row.
+        To change a row that exists, find it with get_database_rows and use
+        update_database_row; to keep a row addressable by a stable key, use
+        upsert_database_row instead.
+
+        `cells` maps field NAME (or id) → value; call get_database_fields first.
+        Value encodings: text / URL → string; Checkbox → true/false; Number →
+        number or numeric string; DateTime → ISO-8601 string or Unix seconds;
+        SingleSelect → an existing option name; MultiSelect → list of existing
+        option names; Relation → list of linked row UUIDs. Cells are validated
+        before anything is written: an unknown field or option returns
+        { error } naming the available ones and creates no row (add options
+        with add_select_option first). Omitted fields stay blank.
 
         Args:
             workspace_id: Workspace UUID (from list_workspaces).
             database_ref: database_id or a view_id (see list_databases).
             cells: { "Field Name": value, ... }.
 
-        Returns: { database_id, row_id } on success, { error } otherwise.
+        Returns: { database_id, row_id, relations_written? } on success,
+                 { database_id, error } otherwise.
         """
         client = await pool.get(ctx)
         try:
             db = await client.resolve_database_id(workspace_id, database_ref)
         except AppFlowyError as exc:
             return {"error": str(exc)}
-        row_id = await client.create_database_row(workspace_id, db, cells)
-        return {"database_id": db, "row_id": row_id}
+        return await _write_row_via_rest(client, workspace_id, db, cells, None)
 
     @mcp.tool()
     async def upsert_database_row(
@@ -1340,14 +1383,22 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
         pre_hash: str,
         cells: dict[str, Any],
     ) -> dict[str, Any]:
-        """Idempotently insert-or-update a row keyed by `pre_hash`.
+        """Insert-or-update a row addressed by a stable key, `pre_hash`.
 
-        The row id is derived from `pre_hash`, so calling again with the same
-        `pre_hash` updates the SAME row instead of adding a duplicate. Cells
-        merge: fields you omit on a later call keep their previous value. Ideal
-        for syncing an external record into a grid (use a stable external id as
-        the pre_hash). Same cell encoding and select-option limits as
-        create_database_row.
+        The row id is derived from `pre_hash`, so a later call with the same
+        key updates the SAME row, and cells merge (fields you omit keep their
+        value). Ideal for syncing an external record into a grid.
+
+        TRAP: the key reaches only a row that was first written with that key.
+        A row that already exists but was created in the UI, by
+        create_database_row, or under a different key is NOT found: the call
+        adds a duplicate beside it. Before the first upsert of a name, search
+        with get_database_rows; if the row exists, change it with
+        update_database_row by its id instead.
+
+        Same value encodings and validation as create_database_row: an unknown
+        field or option returns { error } and writes nothing; Relation cells
+        are written to the row after it exists.
 
         Args:
             workspace_id: Workspace UUID (from list_workspaces).
@@ -1355,17 +1406,15 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
             pre_hash: Stable key identifying the row (e.g. an external id).
             cells: { "Field Name": value, ... }.
 
-        Returns: { database_id, row_id } on success, { error } otherwise.
+        Returns: { database_id, row_id, relations_written? } on success,
+                 { database_id, error } otherwise.
         """
         client = await pool.get(ctx)
         try:
             db = await client.resolve_database_id(workspace_id, database_ref)
         except AppFlowyError as exc:
             return {"error": str(exc)}
-        row_id = await client.upsert_database_row(
-            workspace_id, db, pre_hash, cells
-        )
-        return {"database_id": db, "row_id": row_id}
+        return await _write_row_via_rest(client, workspace_id, db, cells, pre_hash)
 
     @mcp.tool()
     async def update_database_row(

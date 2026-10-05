@@ -27,6 +27,7 @@ from appflowy_mcp.database_collab import (
     relation_cell_is_legacy,
     resolve_cells_dict,
     row_to_document_id,
+    split_cells_for_rest,
 )
 from appflowy_mcp.client import AppFlowyClient
 from appflowy_mcp.config import Config
@@ -132,6 +133,30 @@ class TestDatabaseCollab(unittest.TestCase):
         self.assertEqual(
             resolved["f_rel"], (10, ["94c65ee3-80a6-4eda-bf54-08f5004c96f9"])
         )
+
+    def test_split_cells_for_rest(self):
+        u1 = "94c65ee3-80a6-4eda-bf54-08f5004c96f9"
+        fields = [
+            {"id": "f_text", "name": "Name", "field_type": 0},
+            {
+                "id": "f_select", "name": "Status", "field_type": 3,
+                "type_option": {"content": json.dumps({"options": [{"id": "o1", "name": "Live"}]})},
+            },
+            {"id": "f_rel", "name": "App", "field_type": 10},
+        ]
+        rest, rel = split_cells_for_rest(
+            fields, {"Name": "Thing", "Status": "Live", "f_rel": [u1]}
+        )
+        # REST gets names and the caller's values; relations are split out and
+        # keyed by name even when the caller used the field id.
+        self.assertEqual(rest, {"Name": "Thing", "Status": "Live"})
+        self.assertEqual(rel, {"App": [u1]})
+        with self.assertRaises(ValueError) as cm:
+            split_cells_for_rest(fields, {"Status": "Dead"})
+        self.assertIn("'Live'", str(cm.exception))
+        with self.assertRaises(ValueError) as cm:
+            split_cells_for_rest(fields, {"Nope": "x"})
+        self.assertIn("'Name'", str(cm.exception))
 
     def test_relation_encoding_shapes(self):
         f_rel = {"id": "f_rel", "name": "Tasks", "field_type": 10}

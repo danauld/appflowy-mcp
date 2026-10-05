@@ -327,6 +327,38 @@ def resolve_cells_dict(
     return resolved
 
 
+def split_cells_for_rest(
+    fields: list[dict[str, Any]], cells: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate `cells` for AppFlowy's REST row endpoints and split them.
+
+    Returns (rest_cells, relation_cells), both keyed by field NAME:
+    - `rest_cells` go to `POST`/`PUT .../database/{db}/row`, which accepts
+      names and option labels but silently drops an unknown field or option.
+      Validating here (via `resolve_cells_dict`, which raises ValueError with
+      the available names/options) turns that silent drop into an error
+      before any row is created.
+    - `relation_cells` are written afterwards through the row collab
+      (`update_database_row`), because the REST endpoints do not store
+      Relation cells.
+    Keys given as field ids are mapped to names.
+    """
+    resolved = resolve_cells_dict(fields, cells)  # raises on unknown field/option
+    by_id = {str(f["id"]): f for f in fields if f.get("id")}
+    by_name = {str(f["name"]): f for f in fields if f.get("name")}
+    rest: dict[str, Any] = {}
+    relations: dict[str, Any] = {}
+    for key, val in cells.items():
+        field = by_name.get(str(key)) or by_id[str(key)]
+        name = str(field.get("name"))
+        fid = str(field["id"])
+        if resolved[fid][0] == 10:
+            relations[name] = resolved[fid][1]
+        else:
+            rest[name] = val
+    return rest, relations
+
+
 def apply_row_cells_update(
     doc: Doc, resolved_cells: dict[str, tuple[int, str | list[str]]]
 ) -> bytes:

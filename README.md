@@ -30,8 +30,8 @@ admins.
 | `list_databases(workspace_id)` | List Grid/Board/Calendar databases with their views (note: `database_id` ≠ the folder page's view_id) |
 | `get_database_fields(workspace_id, database_ref)` | A database's fields (columns): id, name, type, primary flag, select `options`, and `relation_database_id` |
 | `get_database_rows(workspace_id, database_ref, limit=100, offset=0, search=None, with_doc=False)` | Read rows with pagination, search, resolved relation records `[{id, title}]`, and optional markdown card body |
-| `create_database_row(workspace_id, database_ref, cells)` | Append a row (`cells` keyed by field name) |
-| `upsert_database_row(workspace_id, database_ref, pre_hash, cells)` | Idempotent insert-or-update keyed by `pre_hash` (cells merge across calls) |
+| `create_database_row(workspace_id, database_ref, cells)` | Append a row (`cells` keyed by field name; validated first, Relation cells included) |
+| `upsert_database_row(workspace_id, database_ref, pre_hash, cells)` | Insert-or-update keyed by `pre_hash` (cells merge across calls; reaches only rows first written with that key, otherwise it adds a duplicate) |
 | `update_database_row(workspace_id, database_ref, row_id, cells)` | In-place update of an existing row's cells by row ID |
 | `add_select_option(workspace_id, database_ref, field_ref, name, color="Purple")` | Add an option to a SingleSelect or MultiSelect field |
 
@@ -213,7 +213,9 @@ connect time.
   write its rows with the `*_database_*` tools, but AppFlowy-Cloud exposes no
   endpoint to create or define fields/columns or select options — design
   columns in the AppFlowy app. SingleSelect/MultiSelect cells can only be set
-  to options that already exist (unknown values are silently dropped to `""`).
+  to options that already exist; the write tools validate cells first and
+  return an error naming the available fields and options instead of letting
+  the REST endpoint drop the cell silently (since 0.18.0).
 - Document and row writes go through AppFlowy's realtime channel as
   incremental updates (since 0.17.0), so they show up live in open editors and
   page size is not a limit. Only a document that does not exist yet is created

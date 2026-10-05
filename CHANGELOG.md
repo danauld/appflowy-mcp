@@ -2,6 +2,16 @@
 
 Version history of `appflowy-mcp`. Format is informal; we record what changed and why.
 
+## 0.18.0 — 2026-10-05
+
+### Changed
+- **`create_database_row` and `upsert_database_row` validate before writing.** AppFlowy's REST row endpoints accept field names and option labels but silently drop an unknown field or option, so an agent that misspelled a field or used an option that did not exist got a row with an empty cell and no warning. Both tools now run the cells through the same resolver `update_database_row` uses (`split_cells_for_rest`): an unknown field or option returns `{ error }` naming the available ones and creates nothing. Keys may be field ids; they are mapped to names for REST.
+- **Relation cells on create/upsert.** The REST endpoints do not store Relation cells. Both tools now create the row with the plain cells and then write the Relation cells through the row collab (`update_database_row`), reporting `relations_written`. If that second step fails the result says so and the row id is returned for a retry.
+- **Docstrings name the duplicate trap.** `upsert_database_row` reaches only a row first written with the same `pre_hash`; a row created in the UI, by `create_database_row`, or under another key gets a duplicate beside it. The docstring now says to search with `get_database_rows` and use `update_database_row` for a row that exists. `create_database_row` says every call adds a row.
+
+### Reminder
+- No new tools; clients need not reconnect, but cached tool descriptions refresh only on reconnect.
+
 ## 0.17.0 — 2026-10-05
 
 ### Changed
