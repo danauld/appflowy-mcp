@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 
-from pycrdt import Doc, Map
+from pycrdt import Array, Doc, Map
 
 from appflowy_mcp.database_collab import (
     FIELD_TYPE_NAMES,
@@ -19,10 +19,12 @@ from appflowy_mcp.database_collab import (
     apply_add_select_option,
     apply_row_cells_update,
     decode_collab_doc,
+    encode_cell_value,
     extract_collab_cells,
     get_field_select_options,
     get_field_type_int,
     parse_relation_row_ids,
+    relation_cell_is_legacy,
     resolve_cells_dict,
     row_to_document_id,
 )
@@ -125,7 +127,58 @@ class TestDatabaseCollab(unittest.TestCase):
         self.assertTrue(resolved["f_date"][1].isdigit())
         self.assertEqual(resolved["f_select"], (3, "opt_todo"))
         self.assertEqual(resolved["f_check"], (5, "true"))
-        self.assertIn("94c65ee3-80a6-4eda-bf54-08f5004c96f9", resolved["f_rel"][1])
+        # Relation cells are stored as a plain list of row ids (AppFlowy's
+        # native `Any::Array`), never a JSON string.
+        self.assertEqual(
+            resolved["f_rel"], (10, ["94c65ee3-80a6-4eda-bf54-08f5004c96f9"])
+        )
+
+    def test_relation_encoding_shapes(self):
+        f_rel = {"id": "f_rel", "name": "Tasks", "field_type": 10}
+        u1 = "94c65ee3-80a6-4eda-bf54-08f5004c96f9"
+        u2 = "5216e20a-7e60-4f05-90a5-26001f6a4c77"
+        self.assertEqual(encode_cell_value(f_rel, None), (10, []))
+        self.assertEqual(encode_cell_value(f_rel, ""), (10, []))
+        self.assertEqual(encode_cell_value(f_rel, []), (10, []))
+        self.assertEqual(encode_cell_value(f_rel, [u1, u2]), (10, [u1, u2]))
+        self.assertEqual(encode_cell_value(f_rel, f"{u1},{u2}"), (10, [u1, u2]))
+        # The legacy JSON-string shape is accepted as input and normalised.
+        self.assertEqual(
+            encode_cell_value(f_rel, json.dumps([{"id": u1}])), (10, [u1])
+        )
+        with self.assertRaises(ValueError):
+            encode_cell_value(f_rel, ["not-a-uuid-value"])
+
+    def test_relation_cell_is_legacy(self):
+        u1 = "94c65ee3-80a6-4eda-bf54-08f5004c96f9"
+        self.assertTrue(relation_cell_is_legacy(json.dumps([{"id": u1}])))
+        self.assertTrue(relation_cell_is_legacy("[]"))
+        self.assertFalse(relation_cell_is_legacy([u1]))
+        self.assertFalse(relation_cell_is_legacy([]))
+        self.assertFalse(relation_cell_is_legacy(None))
+        self.assertFalse(relation_cell_is_legacy(""))
+
+    def test_apply_row_cells_update_relation_is_array(self):
+        u1 = "94c65ee3-80a6-4eda-bf54-08f5004c96f9"
+        u2 = "5216e20a-7e60-4f05-90a5-26001f6a4c77"
+        doc = Doc()
+        # Start from the legacy JSON-string shape, as a pre-0.16 row would hold.
+        apply_row_cells_update(doc, {"f_rel": (10, json.dumps([{"id": u1}]))})
+        update = apply_row_cells_update(doc, {"f_rel": (10, [u1, u2])})
+        self.assertTrue(len(update) > 0)
+        doc2 = Doc()
+        doc2.apply_update(doc.get_update())
+        data = doc2.get("data", type=Map)["data"]["cells"]["f_rel"]["data"]
+        # A plain list (Yrs Any::Array), not a str and not a shared Y.Array.
+        self.assertIsInstance(data, list)
+        self.assertNotIsInstance(data, Array)
+        self.assertEqual(data, [u1, u2])
+        self.assertEqual(
+            doc2.get("data", type=Map)["data"]["cells"]["f_rel"]["field_type"], 10
+        )
+        # The JSON export (what /collab/json returns) carries a list too.
+        exported = doc2.get("data", type=Map).to_py()
+        self.assertEqual(exported["data"]["cells"]["f_rel"]["data"], [u1, u2])
 
     def test_apply_row_cells_update(self):
         doc = Doc()

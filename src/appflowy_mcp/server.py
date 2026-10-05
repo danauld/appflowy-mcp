@@ -265,7 +265,14 @@ class ClientPool:
 
 
 def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
-    mcp = FastMCP("appflowy", host=config.host, port=config.port)
+    # Stateless streamable-HTTP: every request is self-contained, so cloud
+    # connectors that probe `tools/list` without an `initialize` (Codex's and
+    # Claude's `server/discover`) no longer get 400 "Missing session ID", and a
+    # backend restart or a proxied, re-used session id can never 404 a client.
+    # Per-user credentials ride on every request's headers anyway (ClientPool).
+    mcp = FastMCP(
+        "appflowy", host=config.host, port=config.port, stateless_http=True
+    )
     pool = ClientPool(config)
 
     @mcp.tool()
@@ -1386,7 +1393,10 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
         - Checkbox: true / false (or "Yes" / "No")
         - SingleSelect: option name (must exist; use add_select_option if new)
         - MultiSelect: list of option names or comma-separated string
-        - Relation: list of linked row UUIDs or comma-separated UUIDs
+        - Relation: list of linked row UUIDs or comma-separated UUIDs. The
+          list REPLACES the cell: to add a link, send the existing ids (from
+          get_database_rows) plus the new one. Stored as AppFlowy's native
+          array, so it shows in the UI.
         - DateTime: ISO-8601 string or Unix timestamp integer
 
         Args:
