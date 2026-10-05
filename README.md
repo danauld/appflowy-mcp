@@ -214,10 +214,11 @@ connect time.
   endpoint to create or define fields/columns or select options — design
   columns in the AppFlowy app. SingleSelect/MultiSelect cells can only be set
   to options that already exist (unknown values are silently dropped to `""`).
-- Writes via `replace_page_content` go through a background DB upsert. If the
-  page is open in someone's AppFlowy browser/desktop client at the time, the
-  live WebSocket session may overwrite the change — close the page before
-  writing.
+- Document and row writes go through AppFlowy's realtime channel as
+  incremental updates (since 0.17.0), so they show up live in open editors and
+  page size is not a limit. Only a document that does not exist yet is created
+  with a full-state upload; each write tool reports which path it used as
+  `write_path`.
 
 ## License
 

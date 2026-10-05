@@ -10,13 +10,18 @@ Schema (verified against AppFlowy-Collab e59260e):
           "children_map" (Map) { <key> → Array<block_id> }
           "text_map"     (Map) { <key> → Text(plain str or with deltas) }
 
-Output bytes are bincode-serialized `EncodedCollab { state_vector, doc_state, version=V1 }`
-ready to be sent as `encoded_collab_v1` to `PUT /api/workspace/{ws}/collab/{object_id}`.
+`build_document` returns bincode-serialized `EncodedCollab { state_vector,
+doc_state, version=V1 }` for `PUT /api/workspace/{ws}/collab/{object_id}` (a new
+document). Every edit of an EXISTING document returns a `DocEdit`: the incremental
+Yrs v1 update for `POST .../collab/{obj}/web-update` (AppFlowy's realtime channel,
+which applies the change live in open editors and only ships the delta) plus the
+full state as a PUT fallback.
 """
 import json
 import struct
 import uuid
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, NamedTuple
 
 from pycrdt import Array, Doc, Map, Text
 
@@ -263,14 +268,102 @@ def _resolve_match(
     return matches[match_index], None
 
 
+class DocEdit:
+    """One edit to an existing document, in both wire formats.
+
+    `update` is the incremental Yrs v1 update from the server's state to the
+    edited state. It is the body for `POST .../collab/{obj}/web-update`: the
+    realtime server merges it and broadcasts it, so open editors show the change
+    at once and cannot overwrite it, and only the delta travels, so page size is
+    no limit. Proven live 2026-10-05 (appended block visible in an open AppFlowy
+    window in ~2 s, still present after the editor's own sync).
+
+    `encoded_v1` is the full edited state as a bincode `EncodedCollab`, for
+    `PUT /collab/{obj}` when the realtime path is unavailable. That route is a
+    background upsert capped at 5 MB, and a live editor's next sync can overwrite
+    it, so it is the fallback, not the default.
+    """
+
+    def __init__(self, update: bytes, encoded_v1: bytes, blocks_written: int) -> None:
+        self.update = update
+        self.encoded_v1 = encoded_v1
+        self.blocks_written = blocks_written
+
+
+class _OpenDoc(NamedTuple):
+    doc: Doc
+    state_vector: bytes
+    page_id: str
+    blocks_map: Map
+    children_map: Map
+    text_map: Map
+    root_children: Array
+
+
+def _open_document(existing_encoded_collab: bytes) -> _OpenDoc:
+    """Load the server's document state and remember where it stands, so the
+    edit can be exported as a delta from exactly that state."""
+    doc = Doc()
+    doc.apply_update(existing_encoded_collab)
+    state_vector = doc.get_state()
+    document = doc.get("data", type=Map)["document"]
+    page_id = document["page_id"]
+    blocks_map = document["blocks"]
+    meta = document["meta"]
+    children_map = meta["children_map"]
+    text_map = meta["text_map"]
+    root_children = children_map[blocks_map[page_id]["children"]]
+    return _OpenDoc(doc, state_vector, page_id, blocks_map, children_map, text_map, root_children)
+
+
+def _finish(o: _OpenDoc, blocks_written: int) -> DocEdit:
+    update = o.doc.get_update(o.state_vector)
+    full = _encode_encoded_collab(o.doc.get_state(), o.doc.get_update(), version=0)
+    return DocEdit(update, full, blocks_written)
+
+
+def _insert_root_blocks(o: _OpenDoc, blocks: list[dict[str, Any]], at: int) -> None:
+    new_ids = [
+        _add_block(o.blocks_map, o.children_map, o.text_map, o.page_id, b)
+        for b in blocks
+    ]
+    for offset, nid in enumerate(new_ids):
+        o.root_children.insert(at + offset, nid)
+
+
+def _remove_root_range(o: _OpenDoc, start: int, end: int) -> None:
+    """Drop root children [start, end) and free their block trees. pycrdt's
+    Y.Array has no slice deletion and indices shift, so delete `start`
+    repeatedly."""
+    doomed = list(o.root_children)[start:end]
+    for _ in range(end - start):
+        del o.root_children[start]
+    for bid in doomed:
+        _delete_block_tree(bid, o.blocks_map, o.children_map, o.text_map)
+
+
+def replace_content_in_document(
+    existing_encoded_collab: bytes, blocks: list[dict[str, Any]]
+) -> DocEdit:
+    """Replace everything under the root page with `blocks`, keeping the page
+    block and the document's identity so the edit is a delta the realtime
+    server can apply (unlike re-creating the `document` key, which the
+    0.7-era attempt did and which open editors never picked up)."""
+    o = _open_document(existing_encoded_collab)
+    with o.doc.transaction():
+        _remove_root_range(o, 0, len(o.root_children))
+        _insert_root_blocks(o, blocks, 0)
+    return _finish(o, len(blocks))
+
+
 def replace_section_in_document(
     existing_encoded_collab: bytes,
     heading: str,
     new_blocks: list[dict[str, Any]],
     match_index: int | None = None,
-) -> tuple[bytes | None, str | None]:
+) -> tuple[DocEdit | None, str | None]:
     """Replace one root-level section (heading + everything until the next
-    same-or-higher heading) with new blocks. Returns (encoded_v1, error).
+    same-or-higher heading) with new blocks. Returns (edit, error).
 
     Matching is case-insensitive and whitespace-normalized. If multiple
     root-level headings match the same text, `match_index` must be specified
@@ -281,53 +374,17 @@ def replace_section_in_document(
     new section header; if not, the heading is gone. Passing `new_blocks=[]`
     deletes the section entirely.
     """
-    doc = Doc()
-    doc["data"] = Map({})
-    doc.apply_update(existing_encoded_collab)
-
-    document = doc["data"]["document"]
-    page_id = document["page_id"]
-    blocks_map = document["blocks"]
-    meta = document["meta"]
-    children_map = meta["children_map"]
-    text_map = meta["text_map"]
-
-    page_block = blocks_map[page_id]
-    root_children_key = page_block["children"]
-    root_children = children_map[root_children_key]
-
-    matches = _find_root_headings(blocks_map, text_map, root_children, heading)
+    o = _open_document(existing_encoded_collab)
+    matches = _find_root_headings(o.blocks_map, o.text_map, o.root_children, heading)
     match, err = _resolve_match(matches, heading, match_index)
     if err is not None or match is None:
         return None, err
-
     start_index, _heading_id, level = match
-    end_index = _section_end_index(blocks_map, root_children, start_index, level)
-
-    # Capture IDs to delete before we mutate the array.
-    to_delete = list(root_children)[start_index:end_index]
-
-    # Remove the slot range from the Y.Array — repeatedly delete the leftmost
-    # element of the range, since indices shift after each deletion. pycrdt
-    # supports __delitem__ on a single index.
-    for _ in range(end_index - start_index):
-        del root_children[start_index]
-
-    # Free the orphaned block / text / children entries.
-    for bid in to_delete:
-        _delete_block_tree(bid, blocks_map, children_map, text_map)
-
-    # Insert the new blocks at the same position.
-    new_ids: list[str] = []
-    for b in new_blocks:
-        nid = _add_block(blocks_map, children_map, text_map, page_id, b)
-        new_ids.append(nid)
-    for offset, nid in enumerate(new_ids):
-        root_children.insert(start_index + offset, nid)
-
-    doc_state = doc.get_update()
-    state_vector = doc.get_state()
-    return _encode_encoded_collab(state_vector, doc_state, version=0), None
+    end_index = _section_end_index(o.blocks_map, o.root_children, start_index, level)
+    with o.doc.transaction():
+        _remove_root_range(o, start_index, end_index)
+        _insert_root_blocks(o, new_blocks, start_index)
+    return _finish(o, len(new_blocks)), None
 
 
 def _insert_at_heading(
@@ -336,46 +393,22 @@ def _insert_at_heading(
     new_blocks: list[dict[str, Any]],
     match_index: int | None,
     before: bool,
-) -> tuple[bytes | None, str | None]:
+) -> tuple[DocEdit | None, str | None]:
     """Shared implementation for insert_after_heading and insert_before_heading.
 
     `before=False` → insert at index+1 (right after the heading, top of section).
     `before=True`  → insert at index (right before the heading, end of previous
     section / new section above).
     """
-    doc = Doc()
-    doc["data"] = Map({})
-    doc.apply_update(existing_encoded_collab)
-
-    document = doc["data"]["document"]
-    page_id = document["page_id"]
-    blocks_map = document["blocks"]
-    meta = document["meta"]
-    children_map = meta["children_map"]
-    text_map = meta["text_map"]
-
-    page_block = blocks_map[page_id]
-    root_children_key = page_block["children"]
-    root_children = children_map[root_children_key]
-
-    matches = _find_root_headings(blocks_map, text_map, root_children, heading)
+    o = _open_document(existing_encoded_collab)
+    matches = _find_root_headings(o.blocks_map, o.text_map, o.root_children, heading)
     match, err = _resolve_match(matches, heading, match_index)
     if err is not None or match is None:
         return None, err
-
     start_index, _heading_id, _level = match
-    insert_at = start_index if before else start_index + 1
-
-    new_ids: list[str] = []
-    for b in new_blocks:
-        nid = _add_block(blocks_map, children_map, text_map, page_id, b)
-        new_ids.append(nid)
-    for offset, nid in enumerate(new_ids):
-        root_children.insert(insert_at + offset, nid)
-
-    doc_state = doc.get_update()
-    state_vector = doc.get_state()
-    return _encode_encoded_collab(state_vector, doc_state, version=0), None
+    with o.doc.transaction():
+        _insert_root_blocks(o, new_blocks, start_index if before else start_index + 1)
+    return _finish(o, len(new_blocks)), None
 
 
 def insert_after_heading_in_document(
@@ -383,9 +416,9 @@ def insert_after_heading_in_document(
     heading: str,
     new_blocks: list[dict[str, Any]],
     match_index: int | None = None,
-) -> tuple[bytes | None, str | None]:
+) -> tuple[DocEdit | None, str | None]:
     """Insert new blocks immediately after a root-level heading (i.e. at the
-    very top of that section). Returns (encoded_v1, error).
+    very top of that section). Returns (edit, error).
 
     Same matching/ambiguity rules as `replace_section_in_document`.
     """
@@ -399,13 +432,10 @@ def insert_before_heading_in_document(
     heading: str,
     new_blocks: list[dict[str, Any]],
     match_index: int | None = None,
-) -> tuple[bytes | None, str | None]:
+) -> tuple[DocEdit | None, str | None]:
     """Insert new blocks immediately before a root-level heading (i.e. at the
     very end of the previous section, or the beginning of the page if the
-    heading is first). Returns (encoded_v1, error).
-
-    Useful for placing a new H2 section ahead of an existing one without
-    rewriting the surrounding content. Mirror of `insert_after_heading_in_document`.
+    heading is first). Returns (edit, error).
 
     Same matching/ambiguity rules as `replace_section_in_document`.
     """
@@ -416,78 +446,12 @@ def insert_before_heading_in_document(
 
 def append_blocks_to_document(
     existing_encoded_collab: bytes, blocks: list[dict[str, Any]]
-) -> bytes:
-    """Load an existing document, append `blocks` to the end of the root page,
-    and return the re-encoded bincode bytes for `PUT /collab/{obj}`.
-
-    Unlike `build_document`, this preserves the existing Y.Doc state — including
-    its block tree, text deltas, and CRDT clocks — and just mutates it by
-    inserting new top-level blocks. The wire format on the way out is still a
-    full-state `encoded_collab_v1`, because that's what the PUT endpoint
-    expects.
-
-    Same WS-conflict caveat as the rest of the write path: if a live editor
-    session is open on this page, its next sync can overwrite our upsert with
-    its local state. Mitigate by closing all editor sessions before calling.
-    """
-    doc = Doc()
-    doc["data"] = Map({})
-    doc.apply_update(existing_encoded_collab)
-
-    document = doc["data"]["document"]
-    page_id = document["page_id"]
-    blocks_map = document["blocks"]
-    meta = document["meta"]
-    children_map = meta["children_map"]
-    text_map = meta["text_map"]
-
-    page_block = blocks_map[page_id]
-    page_children_key = page_block["children"]
-
-    new_ids: list[str] = []
-    for b in blocks:
-        bid = _add_block(blocks_map, children_map, text_map, page_id, b)
-        new_ids.append(bid)
-
-    # Mutate the existing Y.Array of root children — do NOT reassign the slot
-    # in children_map (that would replace the array and lose CRDT history).
-    root_children = children_map[page_children_key]
-    for bid in new_ids:
-        root_children.append(bid)
-
-    doc_state = doc.get_update()
-    state_vector = doc.get_state()
-    return _encode_encoded_collab(state_vector, doc_state, version=0)
-
-
-def build_replacement_update(
-    existing_encoded_collab: bytes, blocks: list[dict[str, Any]]
-) -> bytes:
-    """Return a Yrs v1 update that — applied to the live AppFlowy realtime
-    Y.Doc — replaces its content with `blocks`.
-
-    For `POST /api/workspace/v1/{ws}/collab/{obj}/web-update`.
-
-    Implementation: load existing state, delete the `document` key from `data`,
-    then insert a fresh one, then return the FULL doc state (not a sv-delta).
-    Sending a full state lets the realtime server merge using Yrs Y.Map
-    last-writer semantics regardless of what state it currently holds — this
-    survives drift between our snapshot and the live realtime state better
-    than a precise delta.
-    """
-    doc = Doc()
-    doc["data"] = Map({})
-    if existing_encoded_collab:
-        doc.apply_update(existing_encoded_collab)
-
-    data_map = doc["data"]
-    if "document" in list(data_map.keys()):
-        del data_map["document"]
-
-    document = Map({})
-    data_map["document"] = document
-    _populate_document(document, blocks)
-
-    # Full state v1 update — pycrdt's get_update() with no state_vector arg
-    # returns encode_state_as_update_v1(StateVector::default()).
-    return doc.get_update()
+) -> DocEdit:
+    """Load an existing document and append `blocks` to the end of the root
+    page. Existing content, inline formatting and CRDT clocks are untouched;
+    the root children Y.Array is mutated in place (never reassigned, which
+    would replace the array and lose its history)."""
+    o = _open_document(existing_encoded_collab)
+    with o.doc.transaction():
+        _insert_root_blocks(o, blocks, len(o.root_children))
+    return _finish(o, len(blocks))

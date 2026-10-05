@@ -1,5 +1,6 @@
 import asyncio
 import json as _json
+import logging
 import re
 from typing import Any
 
@@ -14,10 +15,12 @@ from .database_collab import (
     parse_relation_row_ids,
 )
 from .doc_builder import (
+    DocEdit,
     append_blocks_to_document,
     build_document,
     insert_after_heading_in_document,
     insert_before_heading_in_document,
+    replace_content_in_document,
     replace_section_in_document,
 )
 from .markdown import extract_plain_text, render_document
@@ -210,6 +213,55 @@ async def _resolve_document_view_id(
         return client.row_to_document_id(view_id)
     except Exception:
         return view_id
+
+
+_log = logging.getLogger(__name__)
+
+
+async def _load_document_state(
+    client: AppFlowyClient, workspace_id: str, object_id: str
+) -> bytes:
+    """The document's current Yrs state from the server, or b"" if it has none."""
+    page: dict[str, Any] = {}
+    try:
+        page = await client.get_page_view(workspace_id, object_id)
+    except AppFlowyError:
+        pass
+    raw = bytes(
+        page.get("data", {}).get("encoded_collab") or page.get("encoded_collab") or b""
+    )
+    if not raw:
+        try:
+            cdata = await client.get_collab(workspace_id, object_id, collab_type=0)
+            if cdata.get("doc_state"):
+                raw = bytes(cdata["doc_state"])
+        except Exception:
+            pass
+    return raw
+
+
+async def _write_document(
+    client: AppFlowyClient, workspace_id: str, object_id: str, edit: DocEdit
+) -> str:
+    """Realtime first; full-state PUT only if the realtime channel refuses.
+
+    Returns the path used: "web-update" or "put".
+    """
+    try:
+        await client.apply_doc_update_web(
+            workspace_id, object_id, edit.update, collab_type=0
+        )
+        return "web-update"
+    except AppFlowyError as exc:
+        _log.warning(
+            "web-update refused for %s (%s); falling back to full-state PUT",
+            object_id,
+            str(exc)[:200],
+        )
+        await client.update_page_collab(
+            workspace_id, object_id, edit.encoded_v1, collab_type=0
+        )
+        return "put"
 
 
 class ClientPool:
@@ -590,14 +642,18 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
         """Replace a Document page's entire content with new markdown.
 
         WARNING: This *replaces* the page body — anything that was there is lost.
-        Read first with read_page() if you need to preserve / merge.
+        Read first with read_page() if you need to preserve / merge. Prefer
+        append_to_page / replace_section / insert_after_heading for edits.
 
-        IMPORTANT — live editor conflict: if the page is currently open in
-        someone's AppFlowy browser/desktop client (WebSocket session active),
-        the live client's local Y.Doc state will overwrite our write. Close all
-        AppFlowy tabs/windows for this page before calling this tool, then
-        reopen after to see the change. (The realtime-sync write path that
-        avoids this is non-trivial; tracked separately.)
+        How it writes: the change goes through AppFlowy's realtime channel as an
+        incremental update, so it appears live in any open AppFlowy window (no
+        need to close the page first) and only the change travels, so page size
+        is no limit. If the realtime channel rejects it, the tool falls back to
+        a full-state upload and reports `write_path: "put"`; that path can be
+        overwritten by an editor that has the page open.
+
+        A page that has no document yet (a card body never opened) is created
+        with a full-state upload, reported as `write_path: "put"`.
 
         Supported markdown:
         - Headings, paragraphs, bulleted/numbered/todo lists with nesting,
@@ -611,16 +667,20 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
             view_id: Page UUID (from list_pages) or Database Row UUID (from get_database_rows).
             markdown_content: The new page body as markdown.
 
-        Returns: { view_id, blocks_written } on success.
+        Returns: { view_id, blocks_written, write_path } on success.
         """
         client = await pool.get(ctx)
         target_id = await _resolve_document_view_id(client, workspace_id, view_id)
         blocks = parse_markdown(markdown_content)
-        encoded = build_document(blocks)
-        await client.update_page_collab(
-            workspace_id, target_id, encoded, collab_type=0
-        )
-        return {"view_id": target_id, "blocks_written": len(blocks)}
+        raw = await _load_document_state(client, workspace_id, target_id)
+        if not raw:
+            await client.update_page_collab(
+                workspace_id, target_id, build_document(blocks), collab_type=0
+            )
+            return {"view_id": target_id, "blocks_written": len(blocks), "write_path": "put"}
+        edit = replace_content_in_document(raw, blocks)
+        path = await _write_document(client, workspace_id, target_id, edit)
+        return {"view_id": target_id, "blocks_written": len(blocks), "write_path": path}
 
     @mcp.tool()
     async def append_to_page(
@@ -628,16 +688,15 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
     ) -> dict[str, Any]:
         """Append markdown to the end of a Document page (no overwrite).
 
-        Unlike replace_page_content which rewrites the whole page, this loads
-        the existing Y.Doc, mutates it by inserting the new blocks at the end
-        of the root page's children, and writes the updated full state back.
-        Existing content (including formatting and inline marks) is preserved
-        exactly as-is.
+        Existing content, including formatting and inline marks, is preserved
+        exactly as-is; the new blocks go after the last root block.
 
-        Same live-editor conflict as replace_page_content: if the page is open
-        in someone's AppFlowy browser/desktop client, the live WebSocket
-        session can overwrite our write on its next sync. Close all editor
-        tabs/windows for the page first, then reopen after.
+        How it writes: the change goes through AppFlowy's realtime channel as an
+        incremental update, so it appears live in any open AppFlowy window (no
+        need to close the page first) and only the change travels, so page size
+        is no limit. If the realtime channel rejects it, the tool falls back to
+        a full-state upload and reports `write_path: "put"`; that path can be
+        overwritten by an editor that has the page open.
 
         Supported markdown is the same set as replace_page_content (headings,
         paragraphs, lists with nesting, quotes, code, dividers, tables,
@@ -650,39 +709,23 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
             view_id: Page UUID (from list_pages) or Database Row UUID (from get_database_rows).
             markdown_content: Markdown to append at the end of the page.
 
-        Returns: { view_id, blocks_appended } on success.
+        Returns: { view_id, blocks_appended, write_path } on success.
         """
         new_blocks = parse_markdown(markdown_content)
         if not new_blocks:
-            return {"view_id": view_id, "blocks_appended": 0}
+            return {"view_id": view_id, "blocks_appended": 0, "write_path": "none"}
 
         client = await pool.get(ctx)
         target_id = await _resolve_document_view_id(client, workspace_id, view_id)
-        page: dict[str, Any] = {}
-        try:
-            page = await client.get_page_view(workspace_id, target_id)
-        except AppFlowyError:
-            pass
-        raw = bytes(page.get("data", {}).get("encoded_collab") or page.get("encoded_collab") or b"")
+        raw = await _load_document_state(client, workspace_id, target_id)
         if not raw:
-            try:
-                cdata = await client.get_collab(workspace_id, target_id, collab_type=0)
-                if cdata.get("doc_state"):
-                    raw = bytes(cdata["doc_state"])
-            except Exception:
-                pass
-        if not raw:
-            encoded = build_document(new_blocks)
             await client.update_page_collab(
-                workspace_id, target_id, encoded, collab_type=0
+                workspace_id, target_id, build_document(new_blocks), collab_type=0
             )
-            return {"view_id": target_id, "blocks_appended": len(new_blocks)}
-
-        encoded = append_blocks_to_document(raw, new_blocks)
-        await client.update_page_collab(
-            workspace_id, target_id, encoded, collab_type=0
-        )
-        return {"view_id": target_id, "blocks_appended": len(new_blocks)}
+            return {"view_id": target_id, "blocks_appended": len(new_blocks), "write_path": "put"}
+        edit = append_blocks_to_document(raw, new_blocks)
+        path = await _write_document(client, workspace_id, target_id, edit)
+        return {"view_id": target_id, "blocks_appended": len(new_blocks), "write_path": path}
 
     @mcp.tool()
     async def replace_section(
@@ -708,56 +751,39 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
         title; if not, the heading is removed along with the body. Pass an
         empty string to delete the section entirely.
 
-        Same live-editor conflict as the other write tools — close all editor
-        tabs/windows for the page before calling.
+        How it writes: the change goes through AppFlowy's realtime channel as an
+        incremental update, so it appears live in any open AppFlowy window (no
+        need to close the page first) and only the change travels, so page size
+        is no limit. If the realtime channel rejects it, the tool falls back to
+        a full-state upload and reports `write_path: "put"`; that path can be
+        overwritten by an editor that has the page open.
 
         Args:
             workspace_id: Workspace UUID.
             view_id: Page UUID or Database Row UUID.
-            heading: Heading text to match (e.g. "Доступные MCP-tools").
+            heading: Heading text to match (e.g. "Available MCP tools").
             new_markdown: Markdown to put in place of the section.
             match_index: 0-based index for disambiguating multiple matches.
                 Default None means "fail if ambiguous".
 
-        Returns: { view_id, blocks_written, action: "replaced" } on success,
-                 { view_id, error } on no/ambiguous match.
+        Returns: { view_id, blocks_written, action: "replaced", write_path } on
+                 success, { view_id, error } on no/ambiguous match.
         """
         new_blocks = parse_markdown(new_markdown)
-
         client = await pool.get(ctx)
         target_id = await _resolve_document_view_id(client, workspace_id, view_id)
-        page: dict[str, Any] = {}
-        try:
-            page = await client.get_page_view(workspace_id, target_id)
-        except AppFlowyError:
-            pass
-        raw = bytes(page.get("data", {}).get("encoded_collab") or page.get("encoded_collab") or b"")
+        raw = await _load_document_state(client, workspace_id, target_id)
         if not raw:
-            try:
-                cdata = await client.get_collab(workspace_id, target_id, collab_type=0)
-                if cdata.get("doc_state"):
-                    raw = bytes(cdata["doc_state"])
-            except Exception:
-                pass
-        if not raw:
-            return {
-                "view_id": target_id,
-                "error": "page has no existing document",
-            }
-
-        encoded, err = replace_section_in_document(
-            raw, heading, new_blocks, match_index
-        )
-        if err is not None:
+            return {"view_id": target_id, "error": "page has no existing document"}
+        edit, err = replace_section_in_document(raw, heading, new_blocks, match_index)
+        if err is not None or edit is None:
             return {"view_id": target_id, "error": err}
-
-        await client.update_page_collab(
-            workspace_id, target_id, encoded, collab_type=0
-        )
+        path = await _write_document(client, workspace_id, target_id, edit)
         return {
             "view_id": target_id,
             "blocks_written": len(new_blocks),
             "action": "replaced",
+            "write_path": path,
         }
 
     @mcp.tool()
@@ -777,7 +803,12 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
         Existing section body is preserved — new blocks go between the
         heading and whatever was its first body block.
 
-        Same live-editor conflict as the other write tools.
+        How it writes: the change goes through AppFlowy's realtime channel as an
+        incremental update, so it appears live in any open AppFlowy window (no
+        need to close the page first) and only the change travels, so page size
+        is no limit. If the realtime channel rejects it, the tool falls back to
+        a full-state upload and reports `write_path: "put"`; that path can be
+        overwritten by an editor that has the page open.
 
         Args:
             workspace_id: Workspace UUID.
@@ -786,47 +817,26 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
             markdown_content: Markdown to insert.
             match_index: 0-based index for disambiguating multiple matches.
 
-        Returns: { view_id, blocks_written, action: "inserted" } on success,
-                 { view_id, error } on no/ambiguous match.
+        Returns: { view_id, blocks_written, action: "inserted", write_path } on
+                 success, { view_id, error } on no/ambiguous match.
         """
         new_blocks = parse_markdown(markdown_content)
         if not new_blocks:
-            return {"view_id": view_id, "blocks_written": 0, "action": "inserted"}
-
+            return {"view_id": view_id, "blocks_written": 0, "action": "inserted", "write_path": "none"}
         client = await pool.get(ctx)
         target_id = await _resolve_document_view_id(client, workspace_id, view_id)
-        page: dict[str, Any] = {}
-        try:
-            page = await client.get_page_view(workspace_id, target_id)
-        except AppFlowyError:
-            pass
-        raw = bytes(page.get("data", {}).get("encoded_collab") or page.get("encoded_collab") or b"")
+        raw = await _load_document_state(client, workspace_id, target_id)
         if not raw:
-            try:
-                cdata = await client.get_collab(workspace_id, target_id, collab_type=0)
-                if cdata.get("doc_state"):
-                    raw = bytes(cdata["doc_state"])
-            except Exception:
-                pass
-        if not raw:
-            return {
-                "view_id": target_id,
-                "error": "page has no existing document",
-            }
-
-        encoded, err = insert_after_heading_in_document(
-            raw, heading, new_blocks, match_index
-        )
-        if err is not None:
+            return {"view_id": target_id, "error": "page has no existing document"}
+        edit, err = insert_after_heading_in_document(raw, heading, new_blocks, match_index)
+        if err is not None or edit is None:
             return {"view_id": target_id, "error": err}
-
-        await client.update_page_collab(
-            workspace_id, target_id, encoded, collab_type=0
-        )
+        path = await _write_document(client, workspace_id, target_id, edit)
         return {
             "view_id": target_id,
             "blocks_written": len(new_blocks),
             "action": "inserted",
+            "write_path": path,
         }
 
     @mcp.tool()
@@ -848,7 +858,12 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
         Same matching/ambiguity rules as `replace_section`: case-insensitive,
         whitespace-normalized, multiple matches require `match_index`.
 
-        Same live-editor conflict as the other write tools.
+        How it writes: the change goes through AppFlowy's realtime channel as an
+        incremental update, so it appears live in any open AppFlowy window (no
+        need to close the page first) and only the change travels, so page size
+        is no limit. If the realtime channel rejects it, the tool falls back to
+        a full-state upload and reports `write_path: "put"`; that path can be
+        overwritten by an editor that has the page open.
 
         Args:
             workspace_id: Workspace UUID.
@@ -857,47 +872,26 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
             markdown_content: Markdown to insert.
             match_index: 0-based index for disambiguating multiple matches.
 
-        Returns: { view_id, blocks_written, action: "inserted" } on success,
-                 { view_id, error } on no/ambiguous match.
+        Returns: { view_id, blocks_written, action: "inserted", write_path } on
+                 success, { view_id, error } on no/ambiguous match.
         """
         new_blocks = parse_markdown(markdown_content)
         if not new_blocks:
-            return {"view_id": view_id, "blocks_written": 0, "action": "inserted"}
-
+            return {"view_id": view_id, "blocks_written": 0, "action": "inserted", "write_path": "none"}
         client = await pool.get(ctx)
         target_id = await _resolve_document_view_id(client, workspace_id, view_id)
-        page: dict[str, Any] = {}
-        try:
-            page = await client.get_page_view(workspace_id, target_id)
-        except AppFlowyError:
-            pass
-        raw = bytes(page.get("data", {}).get("encoded_collab") or page.get("encoded_collab") or b"")
+        raw = await _load_document_state(client, workspace_id, target_id)
         if not raw:
-            try:
-                cdata = await client.get_collab(workspace_id, target_id, collab_type=0)
-                if cdata.get("doc_state"):
-                    raw = bytes(cdata["doc_state"])
-            except Exception:
-                pass
-        if not raw:
-            return {
-                "view_id": target_id,
-                "error": "page has no existing document",
-            }
-
-        encoded, err = insert_before_heading_in_document(
-            raw, heading, new_blocks, match_index
-        )
-        if err is not None:
+            return {"view_id": target_id, "error": "page has no existing document"}
+        edit, err = insert_before_heading_in_document(raw, heading, new_blocks, match_index)
+        if err is not None or edit is None:
             return {"view_id": target_id, "error": err}
-
-        await client.update_page_collab(
-            workspace_id, target_id, encoded, collab_type=0
-        )
+        path = await _write_document(client, workspace_id, target_id, edit)
         return {
-            "view_id": view_id,
+            "view_id": target_id,
             "blocks_written": len(new_blocks),
             "action": "inserted",
+            "write_path": path,
         }
 
     @mcp.tool()

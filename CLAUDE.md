@@ -18,11 +18,11 @@ A thin wrapper around the AppFlowy-Cloud REST API plus native Yrs CRDT document 
 | `rename_page` | rename | `POST /api/workspace/{ws}/page-view/{view}/update-name` |
 | `reorder_page` | reorder a page within its current parent (top/bottom/after:/before:) | folder walk to find current parent → resolve `prev_view_id` → `POST /api/workspace/{ws}/page-view/{view}/move` |
 | `move_page` | move a page under a different parent (cross-section move) with optional position | folder walk to resolve `prev_view_id` against new parent's children → `POST /api/workspace/{ws}/page-view/{view}/move` |
-| `replace_page_content` | full rewrite from markdown (accepts view_id or row_id) | `PUT /api/workspace/{ws}/collab/{obj}` with a fresh-built `encoded_collab_v1` |
-| `append_to_page` | append markdown to the end of a page or card body (existing content preserved) | load existing `encoded_collab` → mutate root children Y.Array via pycrdt → `PUT` updated full state |
-| `replace_section` | replace one root-level section by heading-text match | load existing → find heading → delete range → insert parsed new blocks → `PUT` updated full state |
-| `insert_after_heading` | insert new blocks immediately after a root-level heading | load existing → find heading → insert parsed new blocks at index+1 → `PUT` updated full state |
-| `insert_before_heading` | insert new blocks immediately before a root-level heading | load existing → find heading → insert parsed new blocks at index → `PUT` updated full state |
+| `replace_page_content` | full rewrite from markdown (accepts view_id or row_id) | load existing → replace root children in place → incremental update via `POST .../web-update`; `PUT /collab/{obj}` with a fresh `encoded_collab_v1` only when the document does not exist yet |
+| `append_to_page` | append markdown to the end of a page or card body (existing content preserved) | load existing `encoded_collab` → mutate root children Y.Array via pycrdt → incremental update via `POST .../web-update` |
+| `replace_section` | replace one root-level section by heading-text match | load existing → find heading → delete range → insert parsed new blocks → incremental update via `web-update` |
+| `insert_after_heading` | insert new blocks immediately after a root-level heading | load existing → find heading → insert parsed new blocks at index+1 → incremental update via `web-update` |
+| `insert_before_heading` | insert new blocks immediately before a root-level heading | load existing → find heading → insert parsed new blocks at index → incremental update via `web-update` |
 | `list_databases` | list databases (Grid/Board/Calendar) | `GET /api/workspace/{ws}/database` |
 | `get_database_fields` | read fields, types, options, and relation target DBs | `GET /api/workspace/{ws}/database/{db}/fields` |
 | `get_database_rows` | read rows with pagination, search, doc bodies, and relation titles | `GET .../row` + `GET .../row/detail` + `collab_type: 4` for relation resolution |
@@ -138,13 +138,13 @@ Y.Doc.data (Map):                     ← the root key is `data`, NOT `document`
 - **Auth bootstrap**: after `POST /gotrue/token` it is mandatory to call `GET /api/user/verify/{access_token}` — otherwise the user exists in GoTrue but NOT in `af_user`, and `list_workspaces` returns empty.
 - **The JSON output of `/collab/json` flattens Y.Text into a plain string** (deltas are lost). For `read_page` we pull the raw `encoded_collab` from `/page-view` and decode it with pycrdt — the diff with attrs is preserved there.
 
-## Main limitation: writes conflict with active WS sessions
+## Writes: realtime channel first, PUT only as fallback
 
-`replace_page_content` uses `PUT /api/workspace/{ws}/collab/{obj}` — this is a **background upsert into postgres**. If the page is open in a browser/desktop client, the active WebSocket session has its own local Y.Doc, and on its next sync through the realtime server it **overwrites our upsert** (its local state "wins").
+Since 0.17.0 every edit of an existing document or row goes through `POST /api/workspace/v1/{ws}/collab/{obj}/web-update` with an **incremental Yrs update computed from the server's current state** (`doc.get_state()` before the mutation, `doc.get_update(sv)` after). The realtime server applies it, persists it, and broadcasts it, so an open AppFlowy window shows the change at once and cannot overwrite it, and only the delta travels. Verified live on 2026-10-05.
 
-**Workaround**: before `replace_page_content`, close all AppFlowy tabs for this page; open them again afterwards.
+`PUT /api/workspace/{ws}/collab/{obj}` (full `encoded_collab_v1`, a background upsert) remains for two cases only: creating a document that does not exist yet (`build_document`), and the fallback when web-update refuses (`_write_document` in server.py logs a warning and reports `write_path: "put"`). The PUT route is capped at 5 MB by AppFlowy-Cloud and the body is a JSON integer array, so it fails for documents above roughly 1.1 MB of state, and a live editor's next sync can overwrite it.
 
-The attempt to switch to `POST /v1/.../web-update` (the realtime channel AppFlowy Web uses for its own edits) happened in 0.7.0–0.7.1 — the request returns 200, but neither the UI nor the DB picks up our updates. Hypotheses: (a) the Yrs update format from pycrdt differs from what `publish_update` expects, (b) a client_id problem (we are a "one-time web user", not an active session), (c) the message must be a Yjs sync-protocol message, not a bare update. Reverted to PUT in 0.7.2; a deep investigation is a separate TODO.
+Why the 0.7.0 attempt failed: `build_replacement_update` deleted the `document` key and re-created it, then sent the full state. Open editors held the old `document` map and never adopted the new one. Mutating the existing maps and sending the delta is what works; never re-create `document`.
 
 ## How to add a new tool
 

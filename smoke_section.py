@@ -103,6 +103,7 @@ Beta replaced body, with **bold** and a [link](https://x.com)."""
     raw = encoded_v1_to_raw(enc)
 
     new_enc, err = replace_section_in_document(raw, "Beta", new_blocks)
+    new_enc = new_enc.encoded_v1 if new_enc is not None else None
     assert err is None, f"unexpected error: {err}"
     assert new_enc is not None
 
@@ -131,6 +132,7 @@ def test_replace_section_delete() -> None:
     raw = encoded_v1_to_raw(enc)
 
     new_enc, err = replace_section_in_document(raw, "Beta", [])
+    new_enc = new_enc.encoded_v1 if new_enc is not None else None
     assert err is None
     rendered = render(new_enc)
     print(rendered)
@@ -156,12 +158,14 @@ Second Notes section."""
     raw = encoded_v1_to_raw(enc)
 
     new_enc, err = replace_section_in_document(raw, "Notes", parse("## New\n\nNew."))
+    new_enc = new_enc.encoded_v1 if new_enc is not None else None
     assert new_enc is None
     assert err is not None and "multiple matches" in err
     print(f"Got expected error: {err}")
 
     # Now disambiguate with match_index=1 (second one)
     new_enc, err = replace_section_in_document(raw, "Notes", parse("## Renamed\n\nReplaced."), match_index=1)
+    new_enc = new_enc.encoded_v1 if new_enc is not None else None
     assert err is None
     rendered = render(new_enc)
     print(rendered)
@@ -176,6 +180,7 @@ def test_replace_section_not_found() -> None:
     enc = build_initial()
     raw = encoded_v1_to_raw(enc)
     new_enc, err = replace_section_in_document(raw, "Delta", parse("## Delta\n\nbody"))
+    new_enc = new_enc.encoded_v1 if new_enc is not None else None
     assert new_enc is None
     assert err is not None and "not found" in err
     print(f"Got expected error: {err}")
@@ -188,6 +193,7 @@ def test_insert_after_heading() -> None:
     raw = encoded_v1_to_raw(enc)
 
     new_enc, err = insert_after_heading_in_document(raw, "Beta", parse("Inserted right after Beta heading."))
+    new_enc = new_enc.encoded_v1 if new_enc is not None else None
     assert err is None
     rendered = render(new_enc)
     print(rendered)
@@ -207,6 +213,7 @@ def test_insert_before_heading() -> None:
     raw = encoded_v1_to_raw(enc)
 
     new_enc, err = insert_before_heading_in_document(raw, "Beta", parse("## Inserted Before Beta\n\nNew section body."))
+    new_enc = new_enc.encoded_v1 if new_enc is not None else None
     assert err is None
     rendered = render(new_enc)
     print(rendered)
@@ -227,6 +234,7 @@ def test_insert_before_first_heading() -> None:
     raw = encoded_v1_to_raw(enc)
 
     new_enc, err = insert_before_heading_in_document(raw, "Alpha", parse("## Prepended\n\nVery first new section."))
+    new_enc = new_enc.encoded_v1 if new_enc is not None else None
     assert err is None
     rendered = render(new_enc)
     print(rendered)
@@ -244,10 +252,11 @@ def test_replace_then_append() -> None:
     raw = encoded_v1_to_raw(enc)
 
     enc2, err = replace_section_in_document(raw, "Alpha", parse("## Alpha\n\nAlpha new body."))
+    enc2 = enc2.encoded_v1 if enc2 is not None else None
     assert err is None
     raw2 = encoded_v1_to_raw(enc2)
 
-    enc3 = append_blocks_to_document(raw2, parse("## Delta\n\nFresh tail."))
+    enc3 = append_blocks_to_document(raw2, parse("## Delta\n\nFresh tail.")).encoded_v1
     rendered = render(enc3)
     print(rendered)
     assert "Alpha new body." in rendered
