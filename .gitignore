@@ -19,3 +19,5 @@ edit_poc.py
 edit_poc_output.txt
 rendered.md
 smoke_output.txt
+
+.artifacts/

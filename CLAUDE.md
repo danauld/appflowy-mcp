@@ -6,7 +6,7 @@ An MCP server that gives LLM agents (Claude Code, Cline, Claude Desktop, ...) to
 
 ## What is inside
 
-A thin wrapper around the AppFlowy-Cloud REST API plus native Yrs CRDT document assembly on pycrdt. Per-user auth model: every MCP HTTP request carries `X-AppFlowy-Email` / `X-AppFlowy-Password` headers, and tools run under the caller's AppFlowy identity. No shared bot. 20 MCP tools:
+A thin wrapper around the AppFlowy-Cloud REST API plus native Yrs CRDT document assembly on pycrdt. Per-user auth model: every MCP HTTP request carries `X-AppFlowy-Email` / `X-AppFlowy-Password` headers, and tools run under the caller's AppFlowy identity. No shared bot. 30 MCP tools (the original 20 plus the rich tools documented in README.md):
 
 | Tool | What it does | AppFlowy endpoint |
 |---|---|---|
@@ -157,7 +157,13 @@ Why the 0.7.0 attempt failed: `build_replacement_update` deleted the `document` 
 
 ## Principles
 
-- **Do not give the LLM destructive operations by default** (delete/move/wipe are deferred). Read and rename are fine; content edits come with a warning about replacement.
+- **Targeted block operations** require explicit IDs. Nonempty block deletion requires recursive=true; root deletion, cycles and invalid column/table nesting are rejected. Native linked_page blocks refer to view IDs, not URLs.
 - **Tool names and docstrings matter more than the implementation** — they are the interface to the LLM. Change them carefully.
 - **The schema is reverse-engineered, not official** — AppFlowy does not publish an MCP spec; everything was figured out by reading Rust sources. When upgrading AppFlowy-Cloud, re-check the `appflowy-collab/` rev and verify that the schema has not shifted.
 - **All documentation (this file, CHANGELOG.md, README.md) must be written in English.**
+
+## Rich tools (0.19.0)
+
+`rich_tools.py` registers ten additional tools. `rich_document.py` preserves native tree IDs and deltas. `rich_database.py` updates one view in place. Existing rich document mutations use only incremental `web-update`; rejection is an error. `image_upload.py` validates MIME signatures and a 5 MiB decoded limit. Optional `APPFLOWY_PUBLIC_URL` is passed to each per-user client for reachable upload references. HTTP request logging is disabled because verify URLs contain access tokens.
+
+Release builds for this deployment use `.github/workflows/release.yml` on a `vX.Y.Z` tag and publish `ghcr.io/danauld/appflowy-mcp` for amd64/arm64. The homelab repo pins the release; merge then deploy only `appflowy_mcp` through Komodo, verify the actual container and tool count, then reconnect clients.

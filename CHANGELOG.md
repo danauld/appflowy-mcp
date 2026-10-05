@@ -2,6 +2,26 @@
 
 Version history of `appflowy-mcp`. Format is informal; we record what changed and why.
 
+## 0.19.0 — 2026-10-06
+
+- Added ten rich page and database setup tools (30 total): native tree reads,
+  insert/update/move/delete blocks, image uploads, page appearance, fields,
+  linked views and view configuration. The original 20 tool schemas remain.
+- Native blocks include columns, callouts, toggles, outline, uploaded/URL images,
+  Mermaid code, native `linked_page` references, previews and media.
+- Rich edits preserve IDs, unknown properties, text attributes and child ordering;
+  existing pages require realtime updates and do not fall back to full PUT.
+- Image uploads accept base64 PNG/JPEG/WebP/GIF with MIME signature validation,
+  a decoded 5 MiB limit and SHA256 result, without echoing bytes. Configure
+  `APPFLOWY_PUBLIC_URL` for clients when the API origin is internal.
+- Field creation validates definitions and reuses matching named fields.
+  Database views share rows; partial embedding outcomes return created IDs.
+- Suppressed HTTP request logging to prevent auth tokens in verify URLs leaking.
+  API responses with nonzero operation codes now fail instead of reporting success.
+- Verified against AppFlowy-Cloud 0.19.0: fields/options/relations, all five view
+  layouts, realtime rich edits and uploaded-byte readback. Reconnect clients
+  and start a new session to load the ten new tools.
+
 ## 0.18.0 — 2026-10-05
 
 ### Changed

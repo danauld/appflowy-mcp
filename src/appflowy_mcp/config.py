@@ -9,6 +9,7 @@ class Config:
     transport: str
     host: str
     port: int
+    public_url: str | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -30,5 +31,6 @@ class Config:
             in ("true", "1", "yes"),
             transport=transport,
             host=os.getenv("APPFLOWY_MCP_HOST", "0.0.0.0"),
+            public_url=os.getenv("APPFLOWY_PUBLIC_URL"),
             port=int(os.getenv("APPFLOWY_MCP_PORT", "8765")),
         )
