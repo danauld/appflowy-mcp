@@ -50,6 +50,42 @@ matches require `match_index`.
 
 There are no delete/move tools — by design. Reads + additive edits only.
 
+### Rich pages (v0.19.0; 30 tools total)
+
+| Tool | Purpose |
+|---|---|
+| `read_document_blocks` | Read native IDs, nesting, formatting and properties |
+| `insert_document_blocks` | Insert columns, callouts, toggles, images, diagrams, native page links and other supported blocks |
+| `update_document_block` | Patch one block without replacing its ID or children |
+| `move_document_block` | Reorder or reparent a block and its subtree |
+| `delete_document_block` | Delete a specified block; children require explicit `recursive=true` |
+| `upload_image` | Upload base64 PNG/JPEG/WebP/GIF bytes, at most 5 MiB, to AppFlowy storage |
+| `set_page_appearance` | Set icon/cover while preserving other metadata |
+| `create_database_field` | Add or reuse Text, Number, Date, Checkbox, URL, select or Relation fields |
+| `create_database_view` | Create Grid/Board/Calendar/List/Gallery views over shared rows, optionally embedded |
+| `configure_database_view` | Set filters, sorts, grouping and visible fields on one view |
+
+Use `read_document_blocks` before targeted edits. Native insert trees have
+`{type,data,children}`; `data.delta` carries text insert operations and attributes.
+Rich document writes require `web-update`; rejection is an error, with no PUT
+fallback. Initialise a missing row body with `append_to_page` first.
+
+Native **insert page** links use the page ID, not a Markdown URL:
+
+```json
+{"type":"linked_page","data":{"view_id":"destination-page-uuid"}}
+```
+
+For images, call `upload_image`, then insert its returned `block`. A URL image
+can be inserted directly as `{type:"image",data:{url:"https://…",image_type:2}}`.
+Set `APPFLOWY_PUBLIC_URL` to the user-facing AppFlowy origin when the API base
+is an internal Docker hostname; upload URLs must be reachable by the clients.
+Link previews support bookmarks and client-supported embeds; arbitrary iframe
+HTML and automatic GitHub/data-source synchronisation are not provided.
+
+Field/view tools report created IDs on partial outcomes; inspect those IDs
+before retrying so a retry does not create duplicates.
+
 ---
 
 ## For admins — deploying the server
@@ -71,8 +107,8 @@ docker compose up -d appflowy_mcp
 docker compose logs -f appflowy_mcp
 ```
 
-`APPFLOWY_BASE_URL` inside the container points at the internal `appflowy_cloud`
-service, bypassing nginx/TLS. The MCP endpoint itself is plain HTTP on port
+`APPFLOWY_BASE_URL` inside the container points at the internal nginx gateway,
+which routes both `/gotrue` authentication and `/api` requests. The MCP endpoint itself is plain HTTP on port
 `8765`. **Always terminate TLS in front of it** when exposing beyond localhost,
 because each MCP request carries a user's email and password in headers. The
 recommended setup is to add an `/mcp` location to your existing reverse proxy
@@ -141,6 +177,7 @@ convenience). See [.env.example](.env.example).
 | Var | Required | Default | Notes |
 |---|---|---|---|
 | `APPFLOWY_BASE_URL` | yes | — | AppFlowy-Cloud base URL, no trailing slash |
+| `APPFLOWY_PUBLIC_URL` | no | API base URL | Public AppFlowy origin used for uploaded file URLs |
 | `APPFLOWY_TLS_VERIFY` | no | `true` | Set `false` only for self-signed dev certs |
 | `APPFLOWY_MCP_TRANSPORT` | no | `http` | Must be `http` — per-user auth requires the HTTP transport |
 | `APPFLOWY_MCP_HOST` | no | `0.0.0.0` | Bind host |
@@ -182,11 +219,10 @@ cp .env.example .env
   [pycrdt](https://github.com/y-crdt/pycrdt), then render the document tree to
   Markdown (server-side `/collab/json` flattens Y.Text into plain strings and
   loses inline formatting).
-- **Writes** assemble a Y.Doc with pycrdt using AppFlowy's document schema
-  (root `data` → `document` → `blocks` + `meta.{children_map,text_map}`),
-  wrap the encoded update + state vector into AppFlowy's bincode
-  `EncodedCollab` envelope, and PUT it to `/api/workspace/{ws}/collab/{obj}`
-  as `encoded_collab_v1`.
+- **Writes** mutate the existing Y.Doc maps and send incremental updates through
+  AppFlowy's realtime channel. The original Markdown tools retain their reported
+  PUT fallback; rich tools require realtime success. Missing documents are
+  initialised with a full encoded collab.
 - After login, the client hits `GET /api/user/verify/{access_token}` once —
   otherwise the user is invisible to AppFlowy's `af_user` table and
   `list_workspaces` comes back empty.
@@ -206,16 +242,10 @@ connect time.
 - Credentials travel in plain HTTP headers on every request. **Always
   terminate TLS in front of the MCP endpoint** when exposing it beyond
   localhost.
-- No delete or move tools. Intentional — destructive operations should be a
-  separate opt-in.
-- Database **schema** is read-only via the API. You can create a Grid/Board/
-  Calendar with `create_page` (it ships AppFlowy's default columns) and read/
-  write its rows with the `*_database_*` tools, but AppFlowy-Cloud exposes no
-  endpoint to create or define fields/columns or select options — design
-  columns in the AppFlowy app. SingleSelect/MultiSelect cells can only be set
-  to options that already exist; the write tools validate cells first and
-  return an error naming the available fields and options instead of letting
-  the REST endpoint drop the cell silently (since 0.18.0).
+- Block deletion requires an explicit ID; nonempty containers additionally need
+  `recursive=true`. Root deletion and cycles are forbidden.
+- Database setup uses native API/CRDT operations. Relations link existing rows;
+  views share the original database. Fields and option labels are validated.
 - Document and row writes go through AppFlowy's realtime channel as
   incremental updates (since 0.17.0), so they show up live in open editors and
   page size is not a limit. Only a document that does not exist yet is created

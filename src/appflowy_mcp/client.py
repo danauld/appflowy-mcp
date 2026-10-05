@@ -20,8 +20,10 @@ class AppFlowyClient:
         password: str,
         verify: bool = True,
         timeout: float = 30.0,
+        public_url: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.public_url = (public_url or base_url).rstrip("/")
         self._email = email
         self._password = password
         self._http = httpx.AsyncClient(verify=verify, timeout=timeout)
@@ -95,19 +97,23 @@ class AppFlowyClient:
         *,
         params: dict[str, Any] | None = None,
         json: Any = None,
+        content: bytes | None = None,
+        content_type: str | None = None,
     ) -> Any:
         await self._ensure_token()
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {self._access_token}"}
+        if content_type:
+            headers["Content-Type"] = content_type
         r = await self._http.request(
-            method, url, headers=headers, params=params, json=json
+            method, url, headers=headers, params=params, json=json, content=content
         )
         if r.status_code == 401:
             async with self._auth_lock:
                 await self._login()
             headers["Authorization"] = f"Bearer {self._access_token}"
             r = await self._http.request(
-                method, url, headers=headers, params=params, json=json
+                method, url, headers=headers, params=params, json=json, content=content
             )
         if r.status_code >= 400:
             raise AppFlowyError(
@@ -115,7 +121,10 @@ class AppFlowyClient:
             )
         if not r.content:
             return None
-        return r.json()
+        result = r.json()
+        if isinstance(result, dict) and result.get("code", 0) != 0:
+            raise AppFlowyError(f"{method} {path}: {result.get('message', 'operation failed')}")
+        return result
 
     async def list_workspaces(
         self, include_role: bool = True, include_member_count: bool = False
@@ -366,11 +375,7 @@ class AppFlowyClient:
         return resp.get("data")
 
     # ------------------------------------------------------------------ #
-    # Database (Grid / Board / Calendar) — rows & fields.                 #
-    # AppFlowy-Cloud exposes row CRUD + field *reads*; there is no API to #
-    # create or define fields/columns/options, so these operate on a      #
-    # database's existing schema (e.g. a fresh Grid's default columns).    #
-    # ------------------------------------------------------------------ #
+    # Database rows, fields, options and linked views.
 
     async def list_databases(self, workspace_id: str) -> list[dict[str, Any]]:
         resp = await self.request(
@@ -552,3 +557,14 @@ class AppFlowyClient:
             "color": color,
             "existing": is_existing,
         }
+
+    async def upload_image_bytes(self, workspace_id: str, view_id: str, raw: bytes, mime_type: str) -> dict:
+        from urllib.parse import quote
+        path = f"/api/file_storage/{workspace_id}/v1/blob/{view_id}"
+        response = await self.request("PUT", path, content=raw, content_type=mime_type)
+        data = response.get("data") or {}
+        if not data.get("file_id"):
+            raise AppFlowyError("upload response has no file_id")
+        file_id = data["file_id"]
+        return {"file_id": file_id, "url": f"{self.public_url}{path}/{quote(file_id, safe='')}",
+                "parent_dir": view_id}

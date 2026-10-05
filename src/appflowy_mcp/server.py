@@ -307,6 +307,7 @@ class ClientPool:
                     email=email,
                     password=password,
                     verify=self._config.tls_verify,
+                    public_url=self._config.public_url,
                 )
                 self._cache[key] = client
         return client
@@ -326,6 +327,9 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
     mcp = FastMCP(
         "appflowy", host=config.host, port=config.port, stateless_http=True
     )
+    # Auth bootstrap URLs contain tokens; HTTP client logging must not expose them.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     pool = ClientPool(config)
 
     @mcp.tool()
@@ -1503,4 +1507,6 @@ def build_server(config: Config) -> tuple[FastMCP, ClientPool]:
         except Exception as exc:
             return {"error": str(exc)}
 
+    from .rich_tools import register_rich_tools
+    register_rich_tools(mcp, pool, _resolve_document_view_id, _load_document_state)
     return mcp, pool
