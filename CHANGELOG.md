@@ -2,6 +2,19 @@
 
 Version history of `appflowy-mcp`. Format is informal; we record what changed and why.
 
+## 0.16.0 — 2026-10-05
+
+### Fixed
+- **Relation cells now show in AppFlowy.** `update_database_row` used to store a Relation cell as the JSON string `'[{"id": "..."}]'`. AppFlowy's reader (`RelationCellData::from(&Cell)` in collab-database) accepts only an array of row-id UUID strings and returns an empty relation for anything else, so every relation written through the MCP was invisible in the UI while the MCP's own reader (which accepts both shapes) reported it present. `encode_cell_value` now returns a Python list for Relation fields and `apply_row_cells_update` stores it as a Yrs `Any::Array`, matching what the AppFlowy clients write. Row ids are validated as UUIDs; the legacy string shape is still accepted as *input* and normalised.
+- `relation_cell_is_legacy(data)` identifies cells in the old shape, and `scripts/repair_relation_cells.py` rewrites them in place through the realtime `web-update` path (dry run by default, `--apply` to write). On Daniel's workspace 125 cells across `DB • MCPs` and `DB • Self Hosted Apps` were in the legacy shape on 2026-10-05.
+
+### Changed
+- **Stateless streamable-HTTP** (`FastMCP(..., stateless_http=True)`). Each request is self-contained. Cloud connectors that probe `tools/list` without an `initialize` first (Codex's and Claude's `server/discover`) used to get `400 Bad Request: Missing session ID` (222 times in 72 h), a backend restart used to 404 every open client session, and the five-minute Kuma probe produced a session create/terminate pair per check. None of that applies now. Per-user credentials already travel on every request's headers, so nothing else changes for clients.
+- `update_database_row` docstring: a Relation value replaces the whole cell (send the existing ids plus the new one to add a link).
+
+### Reminder
+- No new tools, so clients need not reconnect; an already-open session keeps working because session ids are ignored.
+
 ## 0.15.1 — 2026-09-25
 
 ### Fixed

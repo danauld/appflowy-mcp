@@ -120,6 +120,15 @@ def parse_relation_row_ids(data: Any) -> list[str]:
     return []
 
 
+def relation_cell_is_legacy(data: Any) -> bool:
+    """True when a Relation cell holds the pre-0.16 JSON-string encoding.
+
+    appflowy-mcp <= 0.15.1 wrote `'[{"id": "..."}]'` (a JSON string); AppFlowy's
+    UI reads only an array of UUID strings and shows such a cell as empty.
+    """
+    return isinstance(data, str) and data.strip().startswith("[")
+
+
 def extract_collab_cells(collab_data: dict[str, Any]) -> dict[str, Any]:
     """Extract cells map from /collab/{id}/json endpoint output for DatabaseRow."""
     if not isinstance(collab_data, dict):
@@ -217,8 +226,13 @@ def _resolve_select_option_id(field: dict[str, Any], val: Any) -> str:
     )
 
 
-def encode_cell_value(field: dict[str, Any], val: Any) -> tuple[int, str]:
-    """Encode a Python value into (field_type_int, stored_string_value)."""
+def encode_cell_value(
+    field: dict[str, Any], val: Any
+) -> tuple[int, str | list[str]]:
+    """Encode a Python value into (field_type_int, stored_value).
+
+    The stored value is a string for every field type except Relation, whose
+    native storage is an array of row-id strings."""
     ft_int = get_field_type_int(field)
     fname = field.get("name", "unknown")
 
@@ -267,12 +281,24 @@ def encode_cell_value(field: dict[str, Any], val: Any) -> tuple[int, str]:
                 f"field {fname!r} value {text!r} is not a valid timestamp or ISO-8601 date"
             ) from exc
 
-    # 10: Relation
+    # 10: Relation. AppFlowy stores the linked row ids as a plain array of
+    # UUID strings (collab-database `RelationCellData`: `Any::Array` of
+    # `Any::String`); its reader returns an EMPTY relation for any other shape,
+    # so this must be a Python list (pycrdt stores it as an Any array), never a
+    # JSON string. Versions <= 0.15.1 wrote a JSON string and the UI showed
+    # nothing; see `relation_cell_is_legacy` and scripts/repair_relation_cells.py.
     if ft_int == 10:
         if val is None or val == "" or val == []:
-            return ft_int, "[]"
+            return ft_int, []
         rids = parse_relation_row_ids(val)
-        return ft_int, json.dumps([{"id": rid} for rid in rids])
+        for rid in rids:
+            try:
+                uuid.UUID(rid)
+            except ValueError as exc:
+                raise ValueError(
+                    f"field {fname!r} relation value {rid!r} is not a row UUID"
+                ) from exc
+        return ft_int, rids
 
     # 0: RichText, 6: URL, etc.
     return ft_int, "" if val is None else str(val)
@@ -280,8 +306,8 @@ def encode_cell_value(field: dict[str, Any], val: Any) -> tuple[int, str]:
 
 def resolve_cells_dict(
     fields: list[dict[str, Any]], cells: dict[str, Any]
-) -> dict[str, tuple[int, str]]:
-    """Map user {field_name_or_id: value} -> {field_id: (field_type_int, encoded_string)}."""
+) -> dict[str, tuple[int, str | list[str]]]:
+    """Map user {field_name_or_id: value} -> {field_id: (field_type_int, encoded_value)}."""
     name_map: dict[str, dict[str, Any]] = {}
     id_map: dict[str, dict[str, Any]] = {}
     for f in fields:
@@ -290,7 +316,7 @@ def resolve_cells_dict(
         if f.get("name"):
             name_map[str(f["name"])] = f
 
-    resolved: dict[str, tuple[int, str]] = {}
+    resolved: dict[str, tuple[int, str | list[str]]] = {}
     for key, val in cells.items():
         field = name_map.get(str(key)) or id_map.get(str(key))
         if field is None:
@@ -302,7 +328,7 @@ def resolve_cells_dict(
 
 
 def apply_row_cells_update(
-    doc: Doc, resolved_cells: dict[str, tuple[int, str]]
+    doc: Doc, resolved_cells: dict[str, tuple[int, str | list[str]]]
 ) -> bytes:
     """Mutate row collab cells in a transaction and return the Yjs incremental update."""
     sv = doc.get_state()
@@ -318,6 +344,10 @@ def apply_row_cells_update(
         cells_map = data_map["cells"]
 
         for fid, (fty, enc_val) in resolved_cells.items():
+            # A list stays a list: pycrdt writes it as a Yrs `Any::Array`,
+            # which is what AppFlowy reads a Relation cell as.
+            if isinstance(enc_val, list):
+                enc_val = list(enc_val)
             if fid in cells_map:
                 cell = cells_map[fid]
                 cell["data"] = enc_val
