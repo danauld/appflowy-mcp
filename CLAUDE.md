@@ -26,8 +26,8 @@ A thin wrapper around the AppFlowy-Cloud REST API plus native Yrs CRDT document 
 | `list_databases` | list databases (Grid/Board/Calendar) | `GET /api/workspace/{ws}/database` |
 | `get_database_fields` | read fields, types, options, and relation target DBs | `GET /api/workspace/{ws}/database/{db}/fields` |
 | `get_database_rows` | read rows with pagination, search, doc bodies, and relation titles | `GET .../row` + `GET .../row/detail` + `collab_type: 4` for relation resolution |
-| `create_database_row` | append a new row | `POST /api/workspace/{ws}/database/{db}/row` |
-| `upsert_database_row` | idempotent insert-or-update keyed by pre_hash | `PUT /api/workspace/{ws}/database/{db}/row` |
+| `create_database_row` | append a new row; cells validated first, Relation cells written via the row collab afterwards | `POST /api/workspace/{ws}/database/{db}/row` (+ `web-update`, `collab_type: 4`, for relations) |
+| `upsert_database_row` | insert-or-update keyed by pre_hash (reaches only rows first written with that key); cells validated first, Relation cells via the row collab | `PUT /api/workspace/{ws}/database/{db}/row` (+ `web-update` for relations) |
 | `update_database_row` | in-place update of an existing row by row ID | `POST .../collab/{row_id}/web-update` (`collab_type: 4`) |
 | `add_select_option` | add option to SingleSelect/MultiSelect column | `POST .../collab/{database_id}/web-update` (`collab_type: 1`) |
 
