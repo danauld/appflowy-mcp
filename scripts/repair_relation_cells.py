@@ -29,6 +29,7 @@ import sys
 from appflowy_mcp.client import AppFlowyClient, AppFlowyError
 from appflowy_mcp.database_collab import (
     extract_collab_cells,
+    get_field_type_int,
     parse_relation_row_ids,
     relation_cell_is_legacy,
 )
@@ -47,7 +48,8 @@ async def repair(ws: str, databases: list[str], apply: bool) -> int:
             databases = [d["id"] for d in await client.list_databases(ws) if d.get("id")]
         for db in databases:
             fields = await client.get_database_fields(ws, db)
-            rel = {str(f["id"]): str(f.get("name")) for f in fields if f.get("field_type") == 10}
+            # The REST field list names the type ("Relation"), the collab uses 10.
+            rel = {str(f["id"]): str(f.get("name")) for f in fields if get_field_type_int(f) == 10}
             if not rel:
                 continue
             ids = await client.get_database_row_ids(ws, db)
