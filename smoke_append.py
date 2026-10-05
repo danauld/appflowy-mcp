@@ -89,7 +89,7 @@ def main() -> None:
     raw_doc_state = encoded_v1[8 + sv_len + 8:8 + sv_len + 8 + ds_len]
     print(f"Extracted raw doc_state: {len(raw_doc_state)} bytes")
 
-    new_encoded_v1 = append_blocks_to_document(raw_doc_state, appendix_blocks)
+    new_encoded_v1 = append_blocks_to_document(raw_doc_state, appendix_blocks).encoded_v1
     print(f"After-append encoded_collab_v1 size: {len(new_encoded_v1)} bytes")
 
     # 3. Decode and verify all 4 blocks are present

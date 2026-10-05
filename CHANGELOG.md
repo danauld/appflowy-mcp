@@ -2,6 +2,19 @@
 
 Version history of `appflowy-mcp`. Format is informal; we record what changed and why.
 
+## 0.17.0 — 2026-10-05
+
+### Changed
+- **Document writes go through AppFlowy's realtime channel.** `replace_page_content`, `append_to_page`, `replace_section`, `insert_after_heading` and `insert_before_heading` now load the server's current state, mutate it, and send the incremental Yrs update to `POST /api/workspace/v1/{ws}/collab/{obj}/web-update`, the same path `update_database_row` has used since 0.15.0. Proven on 2026-10-05: a block appended this way was in the server state in 2 s, appeared live in an open AppFlowy window without a reload, and survived the editor's own sync. Consequences:
+  - no more "close AppFlowy before writing": open editors receive the change instead of overwriting it;
+  - no more `413 Payload Too Large` on big pages: AppFlowy-Cloud caps the collab `PUT` at 5 MB and the old path sent the whole document as a JSON integer array (about 4.4 bytes per byte, so a ~1.1 MB document failed, which is how "Fleet — Client Compatibility Audit 2026-09" ended up empty on 2026-09-27); now only the change travels.
+  - Each tool reports `write_path`: `"web-update"` normally, `"put"` when the realtime channel refused and the tool fell back to the full-state upload, or when a page had no document yet (a card body never opened), which still needs the PUT to create it.
+- `doc_builder`: edits return a `DocEdit` (`update` for web-update, `encoded_v1` for the PUT fallback, `blocks_written`); `replace_content_in_document` replaces the root page's children in place; `build_replacement_update` (the 0.7-era attempt, which deleted and re-created the whole `document` key and sent a full state the realtime server never applied to open editors) is removed. `build_document` is unchanged and still used to create a document that does not exist yet.
+- Tool docstrings describe the realtime path instead of the old warning.
+
+### Reminder
+- No new tools; clients need not reconnect.
+
 ## 0.16.0 — 2026-10-05
 
 ### Fixed
